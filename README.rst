@@ -32,6 +32,10 @@ Obtaining sshuttle
 - Debian stretch or later::
 
       apt-get install sshuttle
+      
+- Arch Linux::
+
+      pacman --sync sshuttle
 
 - From PyPI::
 
@@ -67,7 +71,7 @@ It is also possible to install into a virtualenv as a non-root user.
 Documentation
 -------------
 The documentation for the stable version is available at:
-http://sshuttle.readthedocs.org/
+https://sshuttle.readthedocs.org/
 
 The documentation for the latest development version is available at:
-http://sshuttle.readthedocs.org/en/latest/
+https://sshuttle.readthedocs.org/en/latest/

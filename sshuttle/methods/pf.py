@@ -35,11 +35,11 @@ class Generic(object):
 
     class pf_addr(Structure):
         class _pfa(Union):
-            _fields_ = [("v4", c_uint32),     # struct in_addr
-                       ("v6", c_uint32 * 4),  # struct in6_addr
-                       ("addr8", c_uint8 * 16),
-                       ("addr16", c_uint16 * 8),
-                       ("addr32", c_uint32 * 4)]
+            _fields_ = [("v4", c_uint32),      # struct in_addr
+                        ("v6", c_uint32 * 4),  # struct in6_addr
+                        ("addr8", c_uint8 * 16),
+                        ("addr16", c_uint16 * 8),
+                        ("addr32", c_uint32 * 4)]
 
         _fields_ = [("pfa", _pfa)]
         _anonymous_ = ("pfa",)
@@ -120,16 +120,18 @@ class Generic(object):
             pr = self.pfioc_rule()
 
         memmove(addressof(pr) + self.ANCHOR_CALL_OFFSET, name,
-                min(self.MAXPATHLEN, len(name))) # anchor_call = name
+                min(self.MAXPATHLEN, len(name)))  # anchor_call = name
         memmove(addressof(pr) + self.RULE_ACTION_OFFSET,
-                struct.pack('I', kind), 4) # rule.action = kind
+                struct.pack('I', kind), 4)  # rule.action = kind
 
-        memmove(addressof(pr) + self.ACTION_OFFSET, struct.pack(
-            'I', self.PF_CHANGE_GET_TICKET), 4) # action = PF_CHANGE_GET_TICKET
+        memmove(addressof(pr) + self.ACTION_OFFSET,
+                struct.pack('I', self.PF_CHANGE_GET_TICKET),
+                4)  # action = PF_CHANGE_GET_TICKET
         ioctl(pf_get_dev(), pf.DIOCCHANGERULE, pr)
 
-        memmove(addressof(pr) + self.ACTION_OFFSET, struct.pack(
-            'I', self.PF_CHANGE_ADD_TAIL), 4) # action = PF_CHANGE_ADD_TAIL
+        memmove(addressof(pr) + self.ACTION_OFFSET,
+                struct.pack('I', self.PF_CHANGE_ADD_TAIL),
+                4)  # action = PF_CHANGE_ADD_TAIL
         ioctl(pf_get_dev(), pf.DIOCCHANGERULE, pr)
 
     @staticmethod
@@ -149,7 +151,6 @@ class Generic(object):
     @staticmethod
     def has_skip_loopback():
         return b'skip' in pfctl('-s Interfaces -i lo -v')[0]
-
 
 
 class FreeBsd(Generic):
@@ -217,7 +218,7 @@ class FreeBsd(Generic):
             b'pass out route-to lo0 %s proto tcp '
             b'to %s keep state' % (inet_version, subnet)
             if not exclude else
-            b'pass out quick %s proto tcp to %s' % (inet_version, subnet)
+            b'pass out %s proto tcp to %s' % (inet_version, subnet)
             for exclude, subnet in includes
         ]
 
@@ -261,7 +262,7 @@ class OpenBsd(Generic):
                         ("proto_variant", c_uint8),
                         ("direction", c_uint8)]
 
-        self.pfioc_rule = c_char * 3400
+        self.pfioc_rule = c_char * 3416
         self.pfioc_natlook = pfioc_natlook
         super(OpenBsd, self).__init__()
 
@@ -287,7 +288,7 @@ class OpenBsd(Generic):
             b'pass out %s proto tcp to %s '
             b'route-to lo0 keep state' % (inet_version, subnet)
             if not exclude else
-            b'pass out quick %s proto tcp to %s' % (inet_version, subnet)
+            b'pass out %s proto tcp to %s' % (inet_version, subnet)
             for exclude, subnet in includes
         ]
 
@@ -452,7 +453,7 @@ class Method(BaseMethod):
             # exclusion first; the table will ignore the second, opposite
             # definition
             for _, swidth, sexclude, snet, fport, lport \
-                    in sorted(subnets, key=subnet_weight, reverse=True):
+                    in sorted(subnets, key=subnet_weight):
                 includes.append((sexclude, b"%s/%d%s" % (
                     snet.encode("ASCII"),
                     swidth,

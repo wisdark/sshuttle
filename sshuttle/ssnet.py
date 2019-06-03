@@ -4,6 +4,7 @@ import socket
 import errno
 import select
 import os
+
 from sshuttle.helpers import b, binary_type, log, debug1, debug2, debug3, Fatal
 
 MAX_CHANNEL = 65535
@@ -95,6 +96,8 @@ def _try_peername(sock):
         _, e = sys.exc_info()[:2]
         if e.args[0] not in (errno.ENOTCONN, errno.ENOTSOCK):
             raise
+    except AttributeError:
+        pass
     return 'unknown'
 
 

@@ -6,6 +6,7 @@ import zlib
 import imp
 import subprocess as ssubprocess
 import shlex
+
 import sshuttle.helpers as helpers
 from sshuttle.helpers import debug2
 
@@ -76,10 +77,10 @@ def connect(ssh_cmd, rhostport, python, stderr, options):
         else:
             rhost = rhostport
     else:  # IPv4
-        l = (rhostport or '').rsplit(':', 1)
-        rhost = l[0]
-        if len(l) > 1:
-            portl = ['-p', str(int(l[1]))]
+        host_port = (rhostport or '').rsplit(':', 1)
+        rhost = host_port[0]
+        if len(host_port) > 1:
+            portl = ['-p', str(int(host_port[1]))]
 
     if rhost == '-':
         rhost = None
@@ -116,8 +117,8 @@ def connect(ssh_cmd, rhostport, python, stderr, options):
         if python:
             pycmd = "'%s' -c '%s'" % (python, pyscript)
         else:
-            pycmd = ("P=python3; $P -V 2>/dev/null || P=python; "
-                     "exec \"$P\" -c %s") % quote(pyscript)
+            pycmd = ("P=python3; $P -V 2>%s || P=python; "
+                     "exec \"$P\" -c %s") % (os.devnull, quote(pyscript))
             pycmd = ("exec /bin/sh -c %s" % quote(pycmd))
         argv = (sshl +
                 portl +

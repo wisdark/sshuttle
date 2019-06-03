@@ -21,7 +21,7 @@ _smb_ok = True
 hostnames = {}
 queue = {}
 try:
-    null = open('/dev/null', 'wb')
+    null = open(os.devnull, 'wb')
 except IOError:
     _, e = sys.exc_info()[:2]
     log('warning: %s\n' % e)
@@ -44,7 +44,7 @@ def write_host_cache():
     finally:
         try:
             os.unlink(tmpname)
-        except:
+        except BaseException:
             pass
 
 
