@@ -185,12 +185,6 @@ class MultiListener:
 class FirewallClient:
 
     def __init__(self, method_name, sudo_pythonpath):
-
-        # Default to sudo unless on OpenBSD in which case use built in `doas`
-        elevbin = 'sudo'
-        if platform.platform().startswith('OpenBSD'):
-            elevbin = 'doas'
-
         self.auto_nets = []
         python_path = os.path.dirname(os.path.dirname(__file__))
         argvbase = ([sys.executable, sys.argv[0]] +
@@ -199,9 +193,11 @@ class FirewallClient:
                     ['--firewall'])
         if ssyslog._p:
             argvbase += ['--syslog']
-        elev_prefix = [part % {'eb': elevbin}
-                       for part in ['%(eb)s', '-p',
-                                    '[local %(eb)s] Password: ']]
+        # Default to sudo unless on OpenBSD in which case use built in `doas`
+        if platform.platform().startswith('OpenBSD'):
+            elev_prefix = ['doas']
+        else:
+            elev_prefix = ['sudo', '-p', '[local sudo] Password: ']
         if sudo_pythonpath:
             elev_prefix += ['/usr/bin/env',
                             'PYTHONPATH=%s' % python_path]
@@ -224,6 +220,7 @@ class FirewallClient:
                 if argv[0] == 'su':
                     sys.stderr.write('[local su] ')
                 self.p = ssubprocess.Popen(argv, stdout=s1, preexec_fn=setup)
+                # No env: Talking to `FirewallClient.start`, which has no i18n.
                 e = None
                 break
             except OSError as e:
@@ -602,8 +599,13 @@ def main(listenip_v6, listenip_v4,
         except KeyError:
             raise Fatal("User %s does not exist." % user)
 
-    required.ipv6 = len(subnets_v6) > 0 or listenip_v6 is not None
-    required.ipv4 = len(subnets_v4) > 0 or listenip_v4 is not None
+    if fw.method.name != 'nat':
+        required.ipv6 = len(subnets_v6) > 0 or listenip_v6 is not None
+        required.ipv4 = len(subnets_v4) > 0 or listenip_v4 is not None
+    else:
+        required.ipv6 = None
+        required.ipv4 = None
+
     required.udp = avail.udp
     required.dns = len(nslist) > 0
     required.user = False if user is None else True

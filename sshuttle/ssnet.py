@@ -8,6 +8,7 @@ import os
 from sshuttle.helpers import b, binary_type, log, debug1, debug2, debug3, Fatal
 
 MAX_CHANNEL = 65535
+LATENCY_BUFFER_SIZE = 32768
 
 # these don't exist in the socket module in python 2.3!
 SHUT_RD = 0
@@ -56,7 +57,8 @@ cmd_to_name = {
 NET_ERRS = [errno.ECONNREFUSED, errno.ETIMEDOUT,
             errno.EHOSTUNREACH, errno.ENETUNREACH,
             errno.EHOSTDOWN, errno.ENETDOWN,
-            errno.ENETUNREACH]
+            errno.ENETUNREACH, errno.ECONNABORTED,
+            errno.ECONNRESET]
 
 
 def _add(l, elem):
@@ -367,7 +369,7 @@ class Mux(Handler):
         return total
 
     def check_fullness(self):
-        if self.fullness > 32768:
+        if self.fullness > LATENCY_BUFFER_SIZE:
             if not self.too_full:
                 self.send(0, CMD_PING, b('rttest'))
             self.too_full = True
@@ -447,7 +449,7 @@ class Mux(Handler):
     def fill(self):
         self.rsock.setblocking(False)
         try:
-            read = _nb_clean(os.read, self.rsock.fileno(), 32768)
+            read = _nb_clean(os.read, self.rsock.fileno(), LATENCY_BUFFER_SIZE)
         except OSError:
             _, e = sys.exc_info()[:2]
             raise Fatal('other end: %r' % e)

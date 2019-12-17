@@ -179,6 +179,7 @@ class FreeBsd(Generic):
 
     def enable(self):
         returncode = ssubprocess.call(['kldload', 'pf'])
+        # No env: No output.
         super(FreeBsd, self).enable()
         if returncode == 0:
             _pf_context['loaded_by_sshuttle'] = True
@@ -188,6 +189,7 @@ class FreeBsd(Generic):
         if _pf_context['loaded_by_sshuttle'] and \
                 _pf_context['started_by_sshuttle'] == 0:
             ssubprocess.call(['kldunload', 'pf'])
+            # No env: No output.
 
     def add_anchors(self, anchor):
         status = pfctl('-s all')[0]
@@ -262,7 +264,7 @@ class OpenBsd(Generic):
                         ("proto_variant", c_uint8),
                         ("direction", c_uint8)]
 
-        self.pfioc_rule = c_char * 3416
+        self.pfioc_rule = c_char * 3424
         self.pfioc_natlook = pfioc_natlook
         super(OpenBsd, self).__init__()
 

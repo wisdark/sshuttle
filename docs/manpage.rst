@@ -189,6 +189,13 @@ Options
     control feature, maximizing bandwidth usage.  Use at
     your own risk.
 
+.. option:: --latency-buffer-size
+
+    Set the size of the buffer used in latency control. The
+    default is ``32768``. Changing this option allows a compromise
+    to be made between latency and bandwidth without completely
+    disabling latency control (with :option:`--no-latency-control`).
+
 .. option:: -D, --daemon
 
     Automatically fork into the background after connecting
@@ -226,6 +233,29 @@ Options
     the :option:`--auto-hosts` option.  Using this option by itself
     makes it a lot easier to debug and test the :option:`--auto-hosts`
     feature.
+
+.. option:: --sudoers
+
+    sshuttle will auto generate the proper sudoers.d config file and add it.
+    Once this is completed, sshuttle will exit and tell the user if
+    it succeed or not. Do not call this options with sudo, it may generate a
+    incorrect config file.
+
+.. option:: --sudoers-no-modify
+
+    sshuttle will auto generate the proper sudoers.d config and print it to
+    stdout. The option will not modify the system at all.
+
+.. option:: --sudoers-user
+
+    Set the user name or group with %group_name for passwordless operation.
+    Default is the current user.set ALL for all users. Only works with
+    --sudoers or --sudoers-no-modify option.
+
+--option:: --sudoers-filename
+
+    Set the file name for the sudoers.d file to be added. Default is
+    "sshuttle_auto". Only works with --sudoers.
 
 .. option:: --version
 
