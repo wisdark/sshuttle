@@ -11,6 +11,7 @@ import sshuttle.helpers as helpers
 import sshuttle.ssnet as ssnet
 import sshuttle.ssh as ssh
 import sshuttle.ssyslog as ssyslog
+import sshuttle.sdnotify as sdnotify
 from sshuttle.ssnet import SockWrapper, Handler, Proxy, Mux, MuxWrapper
 from sshuttle.helpers import log, debug1, debug2, debug3, Fatal, islocal, \
     resolvconf_nameservers
@@ -223,16 +224,11 @@ class FirewallClient:
                 # No env: Talking to `FirewallClient.start`, which has no i18n.
                 e = None
                 break
-            except OSError as e:
+            except OSError:
                 pass
         self.argv = argv
         s1.close()
-        if sys.version_info < (3, 0):
-            # python 2.7
-            self.pfile = s2.makefile('wb+')
-        else:
-            # python 3.5
-            self.pfile = s2.makefile('rwb')
+        self.pfile = s2.makefile('rwb')
         if e:
             log('Spawning firewall manager: %r\n' % self.argv)
             raise Fatal(e)
@@ -303,8 +299,8 @@ class FirewallClient:
             raise Fatal('%r expected STARTED, got %r' % (self.argv, line))
 
     def sethostip(self, hostname, ip):
-        assert(not re.search(b'[^-\w\.]', hostname))
-        assert(not re.search(b'[^0-9.]', ip))
+        assert(not re.search(rb'[^-\w\.]', hostname))
+        assert(not re.search(rb'[^0-9.]', ip))
         self.pfile.write(b'HOST %s,%s\n' % (hostname, ip))
         self.pfile.flush()
 
@@ -460,7 +456,7 @@ def _main(tcp_listener, udp_listener, fw, ssh_cmd, remotename,
             raise Fatal("failed to establish ssh session (1)")
         else:
             raise
-    mux = Mux(serversock, serversock)
+    mux = Mux(serversock.makefile("rb"), serversock.makefile("wb"))
     handlers.append(mux)
 
     expected = b'SSHUTTLE0001'
@@ -517,8 +513,13 @@ def _main(tcp_listener, udp_listener, fw, ssh_cmd, remotename,
         # set --auto-nets, we might as well wait for the message first, then
         # ignore its contents.
         mux.got_routes = None
-        fw.start()
+        serverready()
+
     mux.got_routes = onroutes
+
+    def serverready():
+        fw.start()
+        sdnotify.send(sdnotify.ready(), sdnotify.status('Connected'))
 
     def onhostlist(hostlist):
         debug2('got host list: %r\n' % hostlist)
@@ -798,6 +799,8 @@ def main(listenip_v6, listenip_v4,
                 # it's not our child anymore; can't waitpid
                 fw.p.returncode = 0
             fw.done()
+            sdnotify.send(sdnotify.stop())
+
         finally:
             if daemon:
                 daemon_cleanup()

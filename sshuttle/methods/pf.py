@@ -3,6 +3,7 @@ import sys
 import platform
 import re
 import socket
+import errno
 import struct
 import subprocess as ssubprocess
 import shlex
@@ -423,7 +424,13 @@ class Method(BaseMethod):
     def get_tcp_dstip(self, sock):
         pfile = self.firewall.pfile
 
-        peer = sock.getpeername()
+        try:
+            peer = sock.getpeername()
+        except socket.error:
+            _, e = sys.exc_info()[:2]
+            if e.args[0] == errno.EINVAL:
+                return sock.getsockname()
+
         proxy = sock.getsockname()
 
         argv = (sock.family, socket.IPPROTO_TCP,

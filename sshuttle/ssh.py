@@ -3,90 +3,94 @@ import os
 import re
 import socket
 import zlib
-import imp
+import importlib
+import importlib.util
 import subprocess as ssubprocess
 import shlex
+from shlex import quote
+import ipaddress
+from urllib.parse import urlparse
 
 import sshuttle.helpers as helpers
 from sshuttle.helpers import debug2
 
-try:
-    # Python >= 3.5
-    from shlex import quote
-except ImportError:
-    # Python 2.x
-    from pipes import quote
 
-
-def readfile(name):
-    tokens = name.split(".")
-    f = None
-
-    token = tokens[0]
-    token_name = [token]
-    token_str = ".".join(token_name)
-
-    try:
-        f, pathname, description = imp.find_module(token_str)
-
-        for token in tokens[1:]:
-            module = imp.load_module(token_str, f, pathname, description)
-            if f is not None:
-                f.close()
-
-            token_name.append(token)
-            token_str = ".".join(token_name)
-
-            f, pathname, description = imp.find_module(
-                token, module.__path__)
-
-        if f is not None:
-            contents = f.read()
-        else:
-            contents = ""
-
-    finally:
-        if f is not None:
-            f.close()
-
-    return contents.encode("UTF8")
+def get_module_source(name):
+    spec = importlib.util.find_spec(name)
+    with open(spec.origin, "rt") as f:
+        return f.read().encode("utf-8")
 
 
 def empackage(z, name, data=None):
     if not data:
-        data = readfile(name)
+        data = get_module_source(name)
     content = z.compress(data)
     content += z.flush(zlib.Z_SYNC_FLUSH)
 
     return b'%s\n%d\n%s' % (name.encode("ASCII"), len(content), content)
 
 
+def parse_hostport(rhostport):
+    """
+    parses the given rhostport variable, looking like this:
+
+            [username[:password]@]host[:port]
+
+    if only host is given, can be a hostname, IPv4/v6 address or a ssh alias
+    from ~/.ssh/config
+
+    and returns a tuple (username, password, port, host)
+    """
+    # leave use of default port to ssh command to prevent overwriting
+    # ports configured in ~/.ssh/config when no port is given
+    port = None
+    username = None
+    password = None
+    host = rhostport
+
+    if "@" in host:
+        # split username (and possible password) from the host[:port]
+        username, host = host.rsplit("@", 1)
+        # Fix #410 bad username error detect
+        if ":" in username:
+            # this will even allow for the username to be empty
+            username, password = username.split(":")
+
+    if ":" in host:
+        # IPv6 address and/or got a port specified
+
+        # If it is an IPv6 adress with port specification,
+        # then it will look like: [::1]:22
+
+        try:
+            # try to parse host as an IP adress,
+            # if that works it is an IPv6 address
+            host = ipaddress.ip_address(host)
+        except ValueError:
+            # if that fails parse as URL to get the port
+            parsed = urlparse('//{}'.format(host))
+            try:
+                host = ipaddress.ip_address(parsed.hostname)
+            except ValueError:
+                # else if both fails, we have a hostname with port
+                host = parsed.hostname
+            port = parsed.port
+
+    if password is None or len(password) == 0:
+        password = None
+
+    return username, password, port, host
+
+
 def connect(ssh_cmd, rhostport, python, stderr, options):
-    portl = []
-
-    if re.sub(r'.*@', '', rhostport or '').count(':') > 1:
-        if rhostport.count(']') or rhostport.count('['):
-            result = rhostport.split(']')
-            rhost = result[0].strip('[')
-            if len(result) > 1:
-                result[1] = result[1].strip(':')
-                if result[1] != '':
-                    portl = ['-p', str(int(result[1]))]
-        # can't disambiguate IPv6 colons and a port number. pass the hostname
-        # through.
-        else:
-            rhost = rhostport
-    else:  # IPv4
-        host_port = (rhostport or '').rsplit(':', 1)
-        rhost = host_port[0]
-        if len(host_port) > 1:
-            portl = ['-p', str(int(host_port[1]))]
-
-    if rhost == '-':
-        rhost = None
+    username, password, port, host = parse_hostport(rhostport)
+    if username:
+        rhost = "{}@{}".format(username, host)
+    else:
+        rhost = host
 
     z = zlib.compressobj(1)
-    content = readfile('sshuttle.assembler')
+    content = get_module_source('sshuttle.assembler')
     optdata = ''.join("%s=%r\n" % (k, v) for (k, v) in list(options.items()))
     optdata = optdata.encode("UTF8")
     content2 = (empackage(z, 'sshuttle') +
@@ -114,15 +118,27 @@ def connect(ssh_cmd, rhostport, python, stderr, options):
             sshl = shlex.split(ssh_cmd)
         else:
             sshl = ['ssh']
+        if port is not None:
+            portl = ["-p", str(port)]
+        else:
+            portl = []
         if python:
             pycmd = "'%s' -c '%s'" % (python, pyscript)
         else:
             pycmd = ("P=python3; $P -V 2>%s || P=python; "
                      "exec \"$P\" -c %s") % (os.devnull, quote(pyscript))
-            pycmd = ("exec /bin/sh -c %s" % quote(pycmd))
-        argv = (sshl +
-                portl +
-                [rhost, '--', pycmd])
+            pycmd = ("/bin/sh -c {}".format(quote(pycmd)))
+
+        if password is not None:
+            os.environ['SSHPASS'] = str(password)
+            argv = (["sshpass", "-e"] + sshl +
+                    portl +
+                    [rhost, '--', pycmd])
+
+        else:
+            argv = (sshl +
+                    portl +
+                    [rhost, '--', pycmd])
     (s1, s2) = socket.socketpair()
 
     def setup():
@@ -133,7 +149,6 @@ def connect(ssh_cmd, rhostport, python, stderr, options):
     debug2('executing: %r\n' % argv)
     p = ssubprocess.Popen(argv, stdin=s1a, stdout=s1b, preexec_fn=setup,
                           close_fds=True, stderr=stderr)
-    # No env: Would affect the entire sshuttle.
     os.close(s1a)
     os.close(s1b)
     s2.sendall(content)

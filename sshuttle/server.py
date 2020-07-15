@@ -6,6 +6,7 @@ import time
 import sys
 import os
 import platform
+from shutil import which
 
 import sshuttle.ssnet as ssnet
 import sshuttle.helpers as helpers
@@ -15,17 +16,12 @@ from sshuttle.ssnet import Handler, Proxy, Mux, MuxWrapper
 from sshuttle.helpers import b, log, debug1, debug2, debug3, Fatal, \
     resolvconf_random_nameserver
 
-try:
-    from shutil import which
-except ImportError:
-    from distutils.spawn import find_executable as which
-
 
 def _ipmatch(ipstr):
     # FIXME: IPv4 only
     if ipstr == 'default':
         ipstr = '0.0.0.0/0'
-    m = re.match('^(\d+(\.\d+(\.\d+(\.\d+)?)?)?)(?:/(\d+))?$', ipstr)
+    m = re.match(r'^(\d+(\.\d+(\.\d+(\.\d+)?)?)?)(?:/(\d+))?$', ipstr)
     if m:
         g = m.groups()
         ips = g[0]
@@ -294,10 +290,7 @@ def main(latency_control, auto_hosts, to_nameserver, auto_nets):
     sys.stdout.flush()
 
     handlers = []
-    mux = Mux(socket.fromfd(sys.stdin.fileno(),
-                            socket.AF_INET, socket.SOCK_STREAM),
-              socket.fromfd(sys.stdout.fileno(),
-                            socket.AF_INET, socket.SOCK_STREAM))
+    mux = Mux(sys.stdin, sys.stdout)
     handlers.append(mux)
 
     debug1('auto-nets:' + str(auto_nets) + '\n')
