@@ -6,6 +6,7 @@ import subprocess as ssubprocess
 import os
 import sys
 import platform
+import psutil
 
 import sshuttle.helpers as helpers
 import sshuttle.ssnet as ssnet
@@ -14,8 +15,9 @@ import sshuttle.ssyslog as ssyslog
 import sshuttle.sdnotify as sdnotify
 from sshuttle.ssnet import SockWrapper, Handler, Proxy, Mux, MuxWrapper
 from sshuttle.helpers import log, debug1, debug2, debug3, Fatal, islocal, \
-    resolvconf_nameservers
+    resolvconf_nameservers, which
 from sshuttle.methods import get_method, Features
+from sshuttle import __version__
 try:
     from pwd import getpwnam
 except ImportError:
@@ -55,7 +57,7 @@ def check_daemon(pidfile):
         if e.errno == errno.ENOENT:
             return  # no pidfile, ok
         else:
-            raise Fatal("can't read %s: %s" % (_pidname, e))
+            raise Fatal("c : can't read %s: %s" % (_pidname, e))
     if not oldpid:
         os.unlink(_pidname)
         return  # invalid pidfile, ok
@@ -194,11 +196,19 @@ class FirewallClient:
                     ['--firewall'])
         if ssyslog._p:
             argvbase += ['--syslog']
-        # Default to sudo unless on OpenBSD in which case use built in `doas`
+
+        # Determine how to prefix the command in order to elevate privileges.
         if platform.platform().startswith('OpenBSD'):
-            elev_prefix = ['doas']
+            elev_prefix = ['doas']  # OpenBSD uses built in `doas`
         else:
             elev_prefix = ['sudo', '-p', '[local sudo] Password: ']
+
+        # Look for binary and switch to absolute path if we can find
+        # it.
+        path = which(elev_prefix[0])
+        if path:
+            elev_prefix[0] = path
+
         if sudo_pythonpath:
             elev_prefix += ['/usr/bin/env',
                             'PYTHONPATH=%s' % python_path]
@@ -213,7 +223,6 @@ class FirewallClient:
         def setup():
             # run in the child process
             s2.close()
-        e = None
         if os.getuid() == 0:
             argv_tries = argv_tries[-1:]  # last entry only
         for argv in argv_tries:
@@ -222,16 +231,13 @@ class FirewallClient:
                     sys.stderr.write('[local su] ')
                 self.p = ssubprocess.Popen(argv, stdout=s1, preexec_fn=setup)
                 # No env: Talking to `FirewallClient.start`, which has no i18n.
-                e = None
                 break
-            except OSError:
-                pass
+            except OSError as e:
+                log('Spawning firewall manager: %r\n' % argv)
+                raise Fatal(e)
         self.argv = argv
         s1.close()
         self.pfile = s2.makefile('rwb')
-        if e:
-            log('Spawning firewall manager: %r\n' % self.argv)
-            raise Fatal(e)
         line = self.pfile.readline()
         self.check()
         if line[0:5] != b'READY':
@@ -299,8 +305,8 @@ class FirewallClient:
             raise Fatal('%r expected STARTED, got %r' % (self.argv, line))
 
     def sethostip(self, hostname, ip):
-        assert(not re.search(rb'[^-\w\.]', hostname))
-        assert(not re.search(rb'[^0-9.]', ip))
+        assert(not re.search(br'[^-\w\.]', hostname))
+        assert(not re.search(br'[^0-9.]', ip))
         self.pfile.write(b'HOST %s,%s\n' % (hostname, ip))
         self.pfile.flush()
 
@@ -417,7 +423,13 @@ def ondns(listener, method, mux, handlers):
     if t is None:
         return
     srcip, dstip, data = t
-    debug1('DNS request from %r to %r: %d bytes\n' % (srcip, dstip, len(data)))
+    # dstip is None if we are using a method where we can't determine
+    # the destination IP of the DNS request that we captured from the client.
+    if dstip is None:
+        debug1('DNS request from %r: %d bytes\n' % (srcip, len(data)))
+    else:
+        debug1('DNS request from %r to %r: %d bytes\n' %
+               (srcip, dstip, len(data)))
     chan = mux.next_channel()
     dnsreqs[chan] = now + 30
     mux.send(chan, ssnet.CMD_DNS_REQ, data)
@@ -431,17 +443,14 @@ def _main(tcp_listener, udp_listener, fw, ssh_cmd, remotename,
           dns_listener, seed_hosts, auto_hosts, auto_nets, daemon,
           to_nameserver):
 
+    helpers.logprefix = 'c : '
     debug1('Starting client with Python version %s\n'
            % platform.python_version())
 
     method = fw.method
 
     handlers = []
-    if helpers.verbose >= 1:
-        helpers.logprefix = 'c : '
-    else:
-        helpers.logprefix = 'client: '
-    debug1('connecting to server...\n')
+    debug1('Connecting to server...\n')
 
     try:
         (serverproc, serversock) = ssh.connect(
@@ -453,7 +462,7 @@ def _main(tcp_listener, udp_listener, fw, ssh_cmd, remotename,
                          auto_nets=auto_nets))
     except socket.error as e:
         if e.args[0] == errno.EPIPE:
-            raise Fatal("failed to establish ssh session (1)")
+            raise Fatal("c : failed to establish ssh session (1)")
         else:
             raise
     mux = Mux(serversock.makefile("rb"), serversock.makefile("wb"))
@@ -471,18 +480,18 @@ def _main(tcp_listener, udp_listener, fw, ssh_cmd, remotename,
         initstring = serversock.recv(len(expected))
     except socket.error as e:
         if e.args[0] == errno.ECONNRESET:
-            raise Fatal("failed to establish ssh session (2)")
+            raise Fatal("c : failed to establish ssh session (2)")
         else:
             raise
 
     rv = serverproc.poll()
     if rv:
-        raise Fatal('server died with error code %d' % rv)
+        raise Fatal('c : server died with error code %d' % rv)
 
     if initstring != expected:
-        raise Fatal('expected server init string %r; got %r'
+        raise Fatal('c : expected server init string %r; got %r'
                     % (expected, initstring))
-    log('Connected.\n')
+    log('Connected to server.\n')
     sys.stdout.flush()
     if daemon:
         daemonize()
@@ -541,11 +550,23 @@ def _main(tcp_listener, udp_listener, fw, ssh_cmd, remotename,
         debug1('seed_hosts: %r\n' % seed_hosts)
         mux.send(0, ssnet.CMD_HOST_REQ, str.encode('\n'.join(seed_hosts)))
 
-    while 1:
-        rv = serverproc.poll()
-        if rv:
-            raise Fatal('server died with error code %d' % rv)
+    def check_ssh_alive():
+        if daemon:
+            # poll() won't tell us when process exited since the
+            # process is no longer our child (it returns 0 all the
+            # time).
+            if not psutil.pid_exists(serverproc.pid):
+                raise Fatal('ssh connection to server (pid %d) exited.' %
+                            serverproc.pid)
+        else:
+            rv = serverproc.poll()
+            # poll returns None if process hasn't exited.
+            if rv is not None:
+                raise Fatal('ssh connection to server (pid %d) exited '
+                            'with returncode %d' % (serverproc.pid, rv))
 
+    while 1:
+        check_ssh_alive()
         ssnet.runonce(handlers, mux)
         if latency_control:
             mux.check_fullness()
@@ -557,40 +578,91 @@ def main(listenip_v6, listenip_v4,
          subnets_include, subnets_exclude, daemon, to_nameserver, pidfile,
          user, sudo_pythonpath):
 
+    if not remotename:
+        print("WARNING: You must specify -r/--remote to securely route "
+              "traffic to a remote machine. Running without -r/--remote "
+              "is only recommended for testing.")
+
     if daemon:
         try:
             check_daemon(pidfile)
         except Fatal as e:
             log("%s\n" % e)
             return 5
-    debug1('Starting sshuttle proxy.\n')
+    debug1('Starting sshuttle proxy (version %s).\n' % __version__)
+    helpers.logprefix = 'c : '
 
     fw = FirewallClient(method_name, sudo_pythonpath)
 
-    # Get family specific subnet lists
+    # If --dns is used, store the IP addresses that the client
+    # normally uses for DNS lookups in nslist. The firewall needs to
+    # redirect packets outgoing to this server to the remote host
+    # instead.
     if dns:
-        nslist += resolvconf_nameservers()
+        nslist += resolvconf_nameservers(True)
         if to_nameserver is not None:
             to_nameserver = "%s@%s" % tuple(to_nameserver[1:])
     else:
         # option doesn't make sense if we aren't proxying dns
+        if to_nameserver and len(to_nameserver) > 0:
+            print("WARNING: --to-ns option is ignored because --dns was not "
+                  "used.")
         to_nameserver = None
 
-    subnets = subnets_include + subnets_exclude  # we don't care here
-    subnets_v6 = [i for i in subnets if i[0] == socket.AF_INET6]
-    nslist_v6 = [i for i in nslist if i[0] == socket.AF_INET6]
-    subnets_v4 = [i for i in subnets if i[0] == socket.AF_INET]
+    # Get family specific subnet lists. Also, the user may not specify
+    # any subnets if they use --auto-nets. In this case, our subnets
+    # list will be empty and the forwarded subnets will be determined
+    # later by the server.
+    subnets_v4 = [i for i in subnets_include if i[0] == socket.AF_INET]
+    subnets_v6 = [i for i in subnets_include if i[0] == socket.AF_INET6]
     nslist_v4 = [i for i in nslist if i[0] == socket.AF_INET]
+    nslist_v6 = [i for i in nslist if i[0] == socket.AF_INET6]
 
-    # Check features available
+    # Get available features from the firewall method
     avail = fw.method.get_supported_features()
+
+    # A feature is "required" if the user supplies us parameters which
+    # implies that the feature is needed.
     required = Features()
 
+    # Select the default addresses to bind to / listen to.
+
+    # Assume IPv4 is always available and should always be enabled. If
+    # a method doesn't provide IPv4 support or if we wish to run
+    # ipv6-only, changes to this code are required.
+    assert avail.ipv4
+    required.ipv4 = True
+
+    # listenip_v4 contains user specified value or it is set to "auto".
+    if listenip_v4 == "auto":
+        listenip_v4 = ('127.0.0.1', 0)
+
+    # listenip_v6 is...
+    #    None when IPv6 is disabled.
+    #    "auto" when listen address is unspecified.
+    #    The user specified address if provided by user
+    if listenip_v6 is None:
+        debug1("IPv6 disabled by --disable-ipv6\n")
     if listenip_v6 == "auto":
         if avail.ipv6:
+            debug1("IPv6 enabled: Using default IPv6 listen address ::1\n")
             listenip_v6 = ('::1', 0)
         else:
+            debug1("IPv6 disabled since it isn't supported by method "
+                   "%s.\n" % fw.method.name)
             listenip_v6 = None
+
+    # Make final decision about enabling IPv6:
+    required.ipv6 = False
+    if listenip_v6:
+        required.ipv6 = True
+
+    # If we get here, it is possible that listenip_v6 was user
+    # specified but not supported by the current method.
+    if required.ipv6 and not avail.ipv6:
+        raise Fatal("An IPv6 listen address was supplied, but IPv6 is "
+                    "disabled at your request or is unsupported by the %s "
+                    "method." % fw.method.name)
 
     if user is not None:
         if getpwnam is None:
@@ -599,38 +671,66 @@ def main(listenip_v6, listenip_v4,
             user = getpwnam(user).pw_uid
         except KeyError:
             raise Fatal("User %s does not exist." % user)
-
-    if fw.method.name != 'nat':
-        required.ipv6 = len(subnets_v6) > 0 or listenip_v6 is not None
-        required.ipv4 = len(subnets_v4) > 0 or listenip_v4 is not None
-    else:
-        required.ipv6 = None
-        required.ipv4 = None
-
-    required.udp = avail.udp
-    required.dns = len(nslist) > 0
     required.user = False if user is None else True
 
-    # if IPv6 not supported, ignore IPv6 DNS servers
-    if not required.ipv6:
-        nslist_v6 = []
-        nslist = nslist_v4
+    if not required.ipv6 and len(subnets_v6) > 0:
+        print("WARNING: IPv6 subnets were ignored because IPv6 is disabled "
+              "in sshuttle.")
+        subnets_v6 = []
+        subnets_include = subnets_v4
 
+    required.udp = avail.udp  # automatically enable UDP if it is available
+    required.dns = len(nslist) > 0
+
+    # Remove DNS servers using IPv6.
+    if required.dns:
+        if not required.ipv6 and len(nslist_v6) > 0:
+            print("WARNING: Your system is configured to use an IPv6 DNS "
+                  "server but sshuttle is not using IPv6. Therefore DNS "
+                  "traffic your system sends to the IPv6 DNS server won't "
+                  "be redirected via sshuttle to the remote machine.")
+            nslist_v6 = []
+            nslist = nslist_v4
+
+        if len(nslist) == 0:
+            raise Fatal("Can't redirect DNS traffic since IPv6 is not "
+                        "enabled in sshuttle and all of the system DNS "
+                        "servers are IPv6.")
+
+    # If we aren't using IPv6, we can safely ignore excluded IPv6 subnets.
+    if not required.ipv6:
+        orig_len = len(subnets_exclude)
+        subnets_exclude = [i for i in subnets_exclude
+                           if i[0] == socket.AF_INET]
+        if len(subnets_exclude) < orig_len:
+            print("WARNING: Ignoring one or more excluded IPv6 subnets "
+                  "because IPv6 is not enabled.")
+
+    # This will print error messages if we required a feature that
+    # isn't available by the current method.
     fw.method.assert_features(required)
 
-    if required.ipv6 and listenip_v6 is None:
-        raise Fatal("IPv6 required but not listening.")
-
     # display features enabled
-    debug1("IPv6 enabled: %r\n" % required.ipv6)
-    debug1("UDP enabled: %r\n" % required.udp)
-    debug1("DNS enabled: %r\n" % required.dns)
-    debug1("User enabled: %r\n" % required.user)
+    def feature_status(label, enabled, available):
+        msg = label + ": "
+        if enabled:
+            msg += "on"
+        else:
+            msg += "off "
+            if available:
+                msg += "(available)"
+            else:
+                msg += "(not available with %s method)" % fw.method.name
+        debug1(msg + "\n")
 
-    # bind to required ports
-    if listenip_v4 == "auto":
-        listenip_v4 = ('127.0.0.1', 0)
+    debug1("Method: %s\n" % fw.method.name)
+    feature_status("IPv4", required.ipv4, avail.ipv4)
+    feature_status("IPv6", required.ipv6, avail.ipv6)
+    feature_status("UDP ", required.udp, avail.udp)
+    feature_status("DNS ", required.dns, avail.dns)
+    feature_status("User", required.user, avail.user)
 
+    # Exclude traffic destined to our listen addresses.
     if required.ipv4 and \
             not any(listenip_v4[0] == sex[1] for sex in subnets_v4):
         subnets_exclude.append((socket.AF_INET, listenip_v4[0], 32, 0, 0))
@@ -638,6 +738,25 @@ def main(listenip_v6, listenip_v4,
     if required.ipv6 and \
             not any(listenip_v6[0] == sex[1] for sex in subnets_v6):
         subnets_exclude.append((socket.AF_INET6, listenip_v6[0], 128, 0, 0))
+
+    # We don't print the IP+port of where we are listening here
+    # because we do that below when we have identified the ports to
+    # listen on.
+    debug1("Subnets to forward through remote host (type, IP, cidr mask "
+           "width, startPort, endPort):\n")
+    for i in subnets_include:
+        debug1("  "+str(i)+"\n")
+    if auto_nets:
+        debug1("NOTE: Additional subnets to forward may be added below by "
+               "--auto-nets.\n")
+    debug1("Subnets to exclude from forwarding:\n")
+    for i in subnets_exclude:
+        debug1("  "+str(i)+"\n")
+    if required.dns:
+        debug1("DNS requests normally directed at these servers will be "
+               "redirected to remote:\n")
+        for i in nslist:
+            debug1("  "+str(i)+"\n")
 
     if listenip_v6 and listenip_v6[1] and listenip_v4 and listenip_v4[1]:
         # if both ports given, no need to search for a spare port
@@ -654,9 +773,8 @@ def main(listenip_v6, listenip_v4,
     redirectport_v6 = 0
     redirectport_v4 = 0
     bound = False
-    debug2('Binding redirector:')
     for port in ports:
-        debug2(' %d' % port)
+        debug2('Trying to bind redirector on port %d\n' % port)
         tcp_listener = MultiListener()
 
         if required.udp:
@@ -698,7 +816,6 @@ def main(listenip_v6, listenip_v4,
             else:
                 raise e
 
-    debug2('\n')
     if not bound:
         assert(last_e)
         raise last_e
@@ -710,10 +827,9 @@ def main(listenip_v6, listenip_v4,
     bound = False
     if required.dns:
         # search for spare port for DNS
-        debug2('Binding DNS:')
         ports = range(12300, 9000, -1)
         for port in ports:
-            debug2(' %d' % port)
+            debug2('Trying to bind DNS redirector on port %d\n' % port)
             if port in used_ports:
                 continue
 
@@ -744,7 +860,7 @@ def main(listenip_v6, listenip_v4,
                     used_ports.append(port)
                 else:
                     raise e
-        debug2('\n')
+
         dns_listener.print_listening("DNS")
         if not bound:
             assert(last_e)

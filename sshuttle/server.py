@@ -6,7 +6,7 @@ import time
 import sys
 import os
 import platform
-from shutil import which
+
 
 import sshuttle.ssnet as ssnet
 import sshuttle.helpers as helpers
@@ -14,7 +14,7 @@ import sshuttle.hostwatch as hostwatch
 import subprocess as ssubprocess
 from sshuttle.ssnet import Handler, Proxy, Mux, MuxWrapper
 from sshuttle.helpers import b, log, debug1, debug2, debug3, Fatal, \
-    resolvconf_random_nameserver
+    resolvconf_random_nameserver, which, get_env
 
 
 def _ipmatch(ipstr):
@@ -82,11 +82,7 @@ def _route_iproute(line):
 
 def _list_routes(argv, extract_route):
     # FIXME: IPv4 only
-    env = {
-        'PATH': os.environ['PATH'],
-        'LC_ALL': "C",
-    }
-    p = ssubprocess.Popen(argv, stdout=ssubprocess.PIPE, env=env)
+    p = ssubprocess.Popen(argv, stdout=ssubprocess.PIPE, env=get_env())
     routes = []
     for line in p.stdout:
         if not line.strip():
@@ -101,7 +97,6 @@ def _list_routes(argv, extract_route):
     rv = p.wait()
     if rv != 0:
         log('WARNING: %r returned %d\n' % (argv, rv))
-        log('WARNING: That prevents --auto-nets from working.\n')
 
     return routes
 
@@ -112,7 +107,8 @@ def list_routes():
     elif which('netstat'):
         routes = _list_routes(['netstat', '-rn'], _route_netstat)
     else:
-        log('WARNING: Neither ip nor netstat were found on the server.\n')
+        log('WARNING: Neither "ip" nor "netstat" were found on the server. '
+            '--auto-nets feature will not work.\n')
         routes = []
 
     for (family, ip, width) in routes:
@@ -187,7 +183,7 @@ class DnsProxy(Handler):
         self.tries += 1
 
         if self.to_nameserver is None:
-            _, peer = resolvconf_random_nameserver()
+            _, peer = resolvconf_random_nameserver(False)
             port = 53
         else:
             peer = self.to_ns_peer
@@ -255,12 +251,12 @@ class UdpProxy(Handler):
             self.sock.setsockopt(socket.SOL_IP, socket.IP_TTL, 63)
 
     def send(self, dstip, data):
-        debug2('UDP: sending to %r port %d\n' % dstip)
+        debug2(' s: UDP: sending to %r port %d\n' % dstip)
         try:
             self.sock.sendto(data, dstip)
         except socket.error:
             _, e = sys.exc_info()[:2]
-            log('UDP send to %r port %d: %s\n' % (dstip[0], dstip[1], e))
+            log(' s: UDP send to %r port %d: %s\n' % (dstip[0], dstip[1], e))
             return
 
     def callback(self, sock):
@@ -268,21 +264,18 @@ class UdpProxy(Handler):
             data, peer = sock.recvfrom(4096)
         except socket.error:
             _, e = sys.exc_info()[:2]
-            log('UDP recv from %r port %d: %s\n' % (peer[0], peer[1], e))
+            log(' s: UDP recv from %r port %d: %s\n' % (peer[0], peer[1], e))
             return
-        debug2('UDP response: %d bytes\n' % len(data))
+        debug2(' s: UDP response: %d bytes\n' % len(data))
         hdr = b("%s,%r," % (peer[0], peer[1]))
         self.mux.send(self.chan, ssnet.CMD_UDP_DATA, hdr + data)
 
 
 def main(latency_control, auto_hosts, to_nameserver, auto_nets):
-    debug1('Starting server with Python version %s\n'
+    debug1(' s: Starting server with Python version %s\n'
            % platform.python_version())
 
-    if helpers.verbose >= 1:
-        helpers.logprefix = ' s: '
-    else:
-        helpers.logprefix = 'server: '
+    helpers.logprefix = ' s: '
     debug1('latency control setting = %r\n' % latency_control)
 
     # synchronization header
@@ -323,7 +316,7 @@ def main(latency_control, auto_hosts, to_nameserver, auto_nets):
                 hw.leftover = b('')
             mux.send(0, ssnet.CMD_HOST_LIST, b('\n').join(lines))
         else:
-            raise Fatal('hostwatch process died')
+            raise Fatal(' s: hostwatch process died')
 
     def got_host_req(data):
         if not hw.pid:
@@ -377,7 +370,7 @@ def main(latency_control, auto_hosts, to_nameserver, auto_nets):
         family = int(data)
         mux.channels[channel] = lambda cmd, data: udp_req(channel, cmd, data)
         if channel in udphandlers:
-            raise Fatal('UDP connection channel %d already open' % channel)
+            raise Fatal(' s: UDP connection channel %d already open' % channel)
         else:
             h = UdpProxy(mux, channel, family)
             handlers.append(h)

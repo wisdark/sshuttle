@@ -18,11 +18,21 @@ def test_get_supported_features():
 
 def test_get_tcp_dstip():
     sock = Mock()
+    sock.family = AF_INET
     sock.getsockopt.return_value = struct.pack(
         '!HHBBBB', socket.ntohs(AF_INET), 1024, 127, 0, 0, 1)
     method = get_method('nat')
     assert method.get_tcp_dstip(sock) == ('127.0.0.1', 1024)
     assert sock.mock_calls == [call.getsockopt(0, 80, 16)]
+
+    sock = Mock()
+    sock.family = AF_INET6
+    sock.getsockopt.return_value = struct.pack(
+        '!HH4xBBBBBBBBBBBBBBBB', socket.ntohs(AF_INET6),
+        1024, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1)
+    method = get_method('nft')
+    assert method.get_tcp_dstip(sock) == ('::1', 1024)
+    assert sock.mock_calls == [call.getsockopt(41, 80, 64)]
 
 
 def test_recv_udp():
@@ -123,12 +133,8 @@ def test_setup_firewall(mock_ipt_chain_exists, mock_ipt_ttl, mock_ipt):
         call(AF_INET, 'nat', 'sshuttle-1025')
     ]
     assert mock_ipt_ttl.mock_calls == [
-        call(AF_INET, 'nat', '-A', 'sshuttle-1025', '-j', 'REDIRECT',
-             '--dest', u'1.2.3.0/24', '-p', 'tcp', '--dport', '8000:9000',
-             '--to-ports', '1025'),
-        call(AF_INET, 'nat', '-A', 'sshuttle-1025', '-j', 'REDIRECT',
-             '--dest', u'1.2.3.33/32', '-p', 'udp',
-             '--dport', '53', '--to-ports', '1027')
+        call(AF_INET, 'nat', '-A', 'sshuttle-1025', '-j', 'RETURN',
+             '-m', 'ttl', '--ttl', '63')
     ]
     assert mock_ipt.mock_calls == [
         call(AF_INET, 'nat', '-D', 'OUTPUT', '-j', 'sshuttle-1025'),
@@ -139,14 +145,16 @@ def test_setup_firewall(mock_ipt_chain_exists, mock_ipt_ttl, mock_ipt):
         call(AF_INET, 'nat', '-F', 'sshuttle-1025'),
         call(AF_INET, 'nat', '-I', 'OUTPUT', '1', '-j', 'sshuttle-1025'),
         call(AF_INET, 'nat', '-I', 'PREROUTING', '1', '-j', 'sshuttle-1025'),
+        call(AF_INET, 'nat', '-A', 'sshuttle-1025', '-j', 'REDIRECT',
+             '--dest', u'1.2.3.33/32', '-p', 'udp',
+             '--dport', '53', '--to-ports', '1027'),
         call(AF_INET, 'nat', '-A', 'sshuttle-1025', '-j', 'RETURN',
-             '-m', 'addrtype', '--dst-type', 'LOCAL',
-             '!', '-p', 'udp'),
+             '-m', 'addrtype', '--dst-type', 'LOCAL'),
         call(AF_INET, 'nat', '-A', 'sshuttle-1025', '-j', 'RETURN',
-             '-m', 'addrtype', '--dst-type', 'LOCAL',
-             '-p', 'udp', '!', '--dport', '53'),
-        call(AF_INET, 'nat', '-A', 'sshuttle-1025', '-j', 'RETURN',
-             '--dest', u'1.2.3.66/32', '-p', 'tcp', '--dport', '8080:8080')
+             '--dest', u'1.2.3.66/32', '-p', 'tcp', '--dport', '8080:8080'),
+        call(AF_INET, 'nat', '-A', 'sshuttle-1025', '-j', 'REDIRECT',
+             '--dest', u'1.2.3.0/24', '-p', 'tcp', '--dport', '8000:9000',
+             '--to-ports', '1025')
     ]
     mock_ipt_chain_exists.reset_mock()
     mock_ipt_ttl.reset_mock()

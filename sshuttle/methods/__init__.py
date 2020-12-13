@@ -1,26 +1,35 @@
-import os
 import importlib
 import socket
 import struct
 import errno
-from sshuttle.helpers import Fatal, debug3
+import ipaddress
+from sshuttle.helpers import Fatal, debug3, which
 
 
 def original_dst(sock):
+    ip = "0.0.0.0"
+    port = -1
     try:
+        family = sock.family
         SO_ORIGINAL_DST = 80
-        SOCKADDR_MIN = 16
-        sockaddr_in = sock.getsockopt(socket.SOL_IP,
-                                      SO_ORIGINAL_DST, SOCKADDR_MIN)
-        (proto, port, a, b, c, d) = struct.unpack('!HHBBBB', sockaddr_in[:8])
-        # FIXME: decoding is IPv4 only.
-        assert(socket.htons(proto) == socket.AF_INET)
-        ip = '%d.%d.%d.%d' % (a, b, c, d)
-        return (ip, port)
+
+        if family == socket.AF_INET:
+            SOCKADDR_MIN = 16
+            sockaddr_in = sock.getsockopt(socket.SOL_IP,
+                                          SO_ORIGINAL_DST, SOCKADDR_MIN)
+            port, raw_ip = struct.unpack_from('!2xH4s', sockaddr_in[:8])
+            ip = str(ipaddress.IPv4Address(raw_ip))
+        elif family == socket.AF_INET6:
+            sockaddr_in = sock.getsockopt(41, SO_ORIGINAL_DST, 64)
+            port, raw_ip = struct.unpack_from("!2xH4x16s", sockaddr_in)
+            ip = str(ipaddress.IPv6Address(raw_ip))
+        else:
+            raise Fatal("fw: Unknown family type.")
     except socket.error as e:
         if e.args[0] == errno.ENOPROTOOPT:
             return sock.getsockname()
         raise
+    return (ip, port)
 
 
 class Features(object):
@@ -38,6 +47,7 @@ class BaseMethod(object):
     @staticmethod
     def get_supported_features():
         result = Features()
+        result.ipv4 = True
         result.ipv6 = False
         result.udp = False
         result.dns = True
@@ -68,7 +78,7 @@ class BaseMethod(object):
 
     def assert_features(self, features):
         avail = self.get_supported_features()
-        for key in ["udp", "dns", "ipv6", "user"]:
+        for key in ["udp", "dns", "ipv6", "ipv4", "user"]:
             if getattr(features, key) and not getattr(avail, key):
                 raise Fatal(
                     "Feature %s not supported with method %s.\n" %
@@ -86,27 +96,19 @@ class BaseMethod(object):
         return False
 
 
-def _program_exists(name):
-    paths = (os.getenv('PATH') or os.defpath).split(os.pathsep)
-    for p in paths:
-        fn = '%s/%s' % (p, name)
-        if os.path.exists(fn):
-            return not os.path.isdir(fn) and os.access(fn, os.X_OK)
-
-
 def get_method(method_name):
     module = importlib.import_module("sshuttle.methods.%s" % method_name)
     return module.Method(method_name)
 
 
 def get_auto_method():
-    if _program_exists('iptables'):
+    if which('iptables'):
         method_name = "nat"
-    elif _program_exists('nft'):
+    elif which('nft'):
         method_name = "nft"
-    elif _program_exists('pfctl'):
+    elif which('pfctl'):
         method_name = "pf"
-    elif _program_exists('ipfw'):
+    elif which('ipfw'):
         method_name = "ipfw"
     else:
         raise Fatal(

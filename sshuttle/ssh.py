@@ -12,7 +12,7 @@ import ipaddress
 from urllib.parse import urlparse
 
 import sshuttle.helpers as helpers
-from sshuttle.helpers import debug2
+from sshuttle.helpers import debug2, which, get_path, Fatal
 
 
 def get_module_source(name):
@@ -43,6 +43,8 @@ def parse_hostport(rhostport):
     """
     # leave use of default port to ssh command to prevent overwriting
     # ports configured in ~/.ssh/config when no port is given
+    if rhostport is None or len(rhostport) == 0:
+        return None, None, None, None
     port = None
     username = None
     password = None
@@ -65,12 +67,12 @@ def parse_hostport(rhostport):
         try:
             # try to parse host as an IP adress,
             # if that works it is an IPv6 address
-            host = ipaddress.ip_address(host)
+            host = str(ipaddress.ip_address(host))
         except ValueError:
             # if that fails parse as URL to get the port
             parsed = urlparse('//{}'.format(host))
             try:
-                host = ipaddress.ip_address(parsed.hostname)
+                host = str(ipaddress.ip_address(parsed.hostname))
             except ValueError:
                 # else if both fails, we have a hostname with port
                 host = parsed.hostname
@@ -139,6 +141,17 @@ def connect(ssh_cmd, rhostport, python, stderr, options):
             argv = (sshl +
                     portl +
                     [rhost, '--', pycmd])
+
+    # Our which() function searches for programs in get_path()
+    # directories (which include PATH). This step isn't strictly
+    # necessary if ssh is already in the user's PATH, but it makes the
+    # error message friendlier if the user incorrectly passes in a
+    # custom ssh command that we cannot find.
+    abs_path = which(argv[0])
+    if abs_path is None:
+        raise Fatal("Failed to find '%s' in path %s" % (argv[0], get_path()))
+    argv[0] = abs_path
+
     (s1, s2) = socket.socketpair()
 
     def setup():
@@ -146,6 +159,7 @@ def connect(ssh_cmd, rhostport, python, stderr, options):
         s2.close()
     s1a, s1b = os.dup(s1.fileno()), os.dup(s1.fileno())
     s1.close()
+
     debug2('executing: %r\n' % argv)
     p = ssubprocess.Popen(argv, stdin=s1a, stdout=s1b, preexec_fn=setup,
                           close_fds=True, stderr=stderr)

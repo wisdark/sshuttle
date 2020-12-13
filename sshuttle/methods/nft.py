@@ -16,7 +16,10 @@ class Method(BaseMethod):
         if udp:
             raise Exception("UDP not supported by nft")
 
-        table = 'sshuttle-%s' % port
+        if family == socket.AF_INET:
+            table = 'sshuttle-ipv4-%s' % port
+        if family == socket.AF_INET6:
+            table = 'sshuttle-ipv6-%s' % port
 
         def _nft(action, *args):
             return nft(family, table, action, *args)
@@ -34,43 +37,79 @@ class Method(BaseMethod):
         _nft('add rule', 'output jump %s' % chain)
         _nft('add rule', 'prerouting jump %s' % chain)
 
+        # setup_firewall() gets called separately for ipv4 and ipv6. Make sure
+        # we only handle the version that we expect to.
+        if family == socket.AF_INET:
+            _nft('add rule', chain, 'meta', 'nfproto', '!=', 'ipv4', 'return')
+        else:
+            _nft('add rule', chain, 'meta', 'nfproto', '!=', 'ipv6', 'return')
+
+        # This TTL hack allows the client and server to run on the
+        # same host. The connections the sshuttle server makes will
+        # have TTL set to 63.
+        if family == socket.AF_INET:
+            _nft('add rule', chain, 'ip ttl == 63 return')
+        elif family == socket.AF_INET6:
+            _nft('add rule', chain, 'ip6 hoplimit == 63 return')
+
+        # Strings to use below to simplify our code
+        if family == socket.AF_INET:
+            ip_version_l = 'ipv4'
+            ip_version = 'ip'
+        elif family == socket.AF_INET6:
+            ip_version_l = 'ipv6'
+            ip_version = 'ip6'
+
+        # Redirect DNS traffic as requested. This includes routing traffic
+        # to localhost DNS servers through sshuttle.
+        for _, ip in [i for i in nslist if i[0] == family]:
+            _nft('add rule', chain, ip_version,
+                 'daddr %s' % ip, 'udp dport 53',
+                 ('redirect to :' + str(dnsport)))
+
+        # Don't route any remaining local traffic through sshuttle
+        _nft('add rule', chain, 'fib daddr type local return')
+
         # create new subnet entries.
         for _, swidth, sexclude, snet, fport, lport \
                 in sorted(subnets, key=subnet_weight, reverse=True):
-            tcp_ports = ('ip', 'protocol', 'tcp')
+
+            # match using nfproto as described at
+            # https://superuser.com/questions/1560376/match-ipv6-protocol-using-nftables
             if fport and fport != lport:
-                tcp_ports = \
-                    tcp_ports + \
-                    ('tcp', 'dport', '{ %d-%d }' % (fport, lport))
+                tcp_ports = ('meta', 'nfproto', ip_version_l, 'tcp',
+                             'dport', '{ %d-%d }' % (fport, lport))
             elif fport and fport == lport:
-                tcp_ports = tcp_ports + ('tcp', 'dport', '%d' % (fport))
+                tcp_ports = ('meta', 'nfproto', ip_version_l, 'tcp',
+                             'dport', '%d' % (fport))
+            else:
+                tcp_ports = ('meta', 'nfproto', ip_version_l,
+                             'meta', 'l4proto', 'tcp')
 
             if sexclude:
                 _nft('add rule', chain, *(tcp_ports + (
-                     'ip daddr %s/%s' % (snet, swidth), 'return')))
+                     ip_version, 'daddr %s/%s' % (snet, swidth), 'return')))
             else:
                 _nft('add rule', chain, *(tcp_ports + (
-                     'ip daddr %s/%s' % (snet, swidth), 'ip ttl != 63',
-                     ('redirect to :' + str(port)))))
-
-        for _, ip in [i for i in nslist if i[0] == family]:
-            if family == socket.AF_INET:
-                _nft('add rule', chain, 'ip protocol udp ip daddr %s' % ip,
-                     'udp dport { 53 }', 'ip ttl != 63',
-                     ('redirect to :' + str(dnsport)))
-            elif family == socket.AF_INET6:
-                _nft('add rule', chain, 'ip6 protocol udp ip6 daddr %s' % ip,
-                     'udp dport { 53 }', 'ip ttl != 63',
-                     ('redirect to :' + str(dnsport)))
+                    ip_version, 'daddr %s/%s' % (snet, swidth),
+                    ('redirect to :' + str(port)))))
 
     def restore_firewall(self, port, family, udp, user):
         if udp:
             raise Exception("UDP not supported by nft method_name")
 
-        table = 'sshuttle-%s' % port
+        if family == socket.AF_INET:
+            table = 'sshuttle-ipv4-%s' % port
+        if family == socket.AF_INET6:
+            table = 'sshuttle-ipv6-%s' % port
 
         def _nft(action, *args):
             return nft(family, table, action, *args)
 
         # basic cleanup/setup of chains
         nonfatal(_nft, 'delete table', '')
+
+    def get_supported_features(self):
+        result = super(Method, self).get_supported_features()
+        result.ipv6 = True
+        return result

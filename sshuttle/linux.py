@@ -1,14 +1,13 @@
-import os
 import socket
 import subprocess as ssubprocess
-from sshuttle.helpers import log, debug1, Fatal, family_to_string
+from sshuttle.helpers import log, debug1, Fatal, family_to_string, get_env
 
 
 def nonfatal(func, *args):
     try:
         func(*args)
     except Fatal as e:
-        log('error: %s\n' % e)
+        log('fw: error: %s\n' % e)
 
 
 def ipt_chain_exists(family, table, name):
@@ -19,17 +18,13 @@ def ipt_chain_exists(family, table, name):
     else:
         raise Exception('Unsupported family "%s"' % family_to_string(family))
     argv = [cmd, '-t', table, '-nL']
-    env = {
-        'PATH': os.environ['PATH'],
-        'LC_ALL': "C",
-    }
     try:
-        output = ssubprocess.check_output(argv, env=env)
+        output = ssubprocess.check_output(argv, env=get_env())
         for line in output.decode('ASCII').split('\n'):
             if line.startswith('Chain %s ' % name):
                 return True
     except ssubprocess.CalledProcessError as e:
-        raise Fatal('%r returned %d' % (argv, e.returncode))
+        raise Fatal('fw: %r returned %d' % (argv, e.returncode))
 
 
 def ipt(family, table, *args):
@@ -39,14 +34,10 @@ def ipt(family, table, *args):
         argv = ['iptables', '-t', table] + list(args)
     else:
         raise Exception('Unsupported family "%s"' % family_to_string(family))
-    debug1('>> %s\n' % ' '.join(argv))
-    env = {
-        'PATH': os.environ['PATH'],
-        'LC_ALL': "C",
-    }
-    rv = ssubprocess.call(argv, env=env)
+    debug1('%s\n' % ' '.join(argv))
+    rv = ssubprocess.call(argv, env=get_env())
     if rv:
-        raise Fatal('%r returned %d' % (argv, rv))
+        raise Fatal('fw: %r returned %d' % (argv, rv))
 
 
 def nft(family, table, action, *args):
@@ -54,14 +45,10 @@ def nft(family, table, action, *args):
         argv = ['nft', action, 'inet', table] + list(args)
     else:
         raise Exception('Unsupported family "%s"' % family_to_string(family))
-    debug1('>> %s\n' % ' '.join(argv))
-    env = {
-        'PATH': os.environ['PATH'],
-        'LC_ALL': "C",
-    }
-    rv = ssubprocess.call(argv, env=env)
+    debug1('%s\n' % ' '.join(argv))
+    rv = ssubprocess.call(argv, env=get_env())
     if rv:
-        raise Fatal('%r returned %d' % (argv, rv))
+        raise Fatal('fw: %r returned %d' % (argv, rv))
 
 
 _no_ttl_module = False
@@ -74,12 +61,12 @@ def ipt_ttl(family, *args):
         # with ttl 63.  This makes the client side not recapture those
         # connections, in case client == server.
         try:
-            argsplus = list(args) + ['-m', 'ttl', '!', '--ttl', '63']
+            argsplus = list(args)
             ipt(family, *argsplus)
         except Fatal:
             ipt(family, *args)
             # we only get here if the non-ttl attempt succeeds
-            log('sshuttle: warning: your iptables is missing '
+            log('fw: WARNING: your iptables is missing '
                 'the ttl module.\n')
             _no_ttl_module = True
     else:
