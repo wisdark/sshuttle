@@ -1,9 +1,9 @@
 import struct
 from sshuttle.firewall import subnet_weight
 from sshuttle.helpers import family_to_string
-from sshuttle.linux import ipt, ipt_ttl, ipt_chain_exists
+from sshuttle.linux import ipt, ipt_chain_exists
 from sshuttle.methods import BaseMethod
-from sshuttle.helpers import debug1, debug3, Fatal
+from sshuttle.helpers import debug1, debug2, debug3, Fatal, which
 
 recvmsg = None
 try:
@@ -32,7 +32,7 @@ IPV6_RECVORIGDSTADDR = IPV6_ORIGDSTADDR
 
 if recvmsg == "python":
     def recv_udp(listener, bufsize):
-        debug3('Accept UDP python using recvmsg.\n')
+        debug3('Accept UDP python using recvmsg.')
         data, ancdata, _, srcip = listener.recvmsg(
             4096, socket.CMSG_SPACE(24))
         dstip = None
@@ -63,7 +63,7 @@ if recvmsg == "python":
         return (srcip, dstip, data)
 elif recvmsg == "socket_ext":
     def recv_udp(listener, bufsize):
-        debug3('Accept UDP using socket_ext recvmsg.\n')
+        debug3('Accept UDP using socket_ext recvmsg.')
         srcip, data, adata, _ = listener.recvmsg(
             (bufsize,), socket.CMSG_SPACE(24))
         dstip = None
@@ -96,7 +96,7 @@ elif recvmsg == "socket_ext":
         return (srcip, dstip, data[0])
 else:
     def recv_udp(listener, bufsize):
-        debug3('Accept UDP using recvfrom.\n')
+        debug3('Accept UDP using recvfrom.')
         data, srcip = listener.recvfrom(bufsize)
         return (srcip, None, data)
 
@@ -151,7 +151,7 @@ class Method(BaseMethod):
             udp_listener.v6.setsockopt(SOL_IPV6, IPV6_RECVORIGDSTADDR, 1)
 
     def setup_firewall(self, port, dnsport, nslist, family, subnets, udp,
-                       user):
+                       user, tmark):
         if family not in [socket.AF_INET, socket.AF_INET6]:
             raise Exception(
                 'Address family "%s" unsupported by tproxy method'
@@ -161,9 +161,6 @@ class Method(BaseMethod):
 
         def _ipt(*args):
             return ipt(family, table, *args)
-
-        def _ipt_ttl(*args):
-            return ipt_ttl(family, table, *args)
 
         def _ipt_proto_ports(proto, fport, lport):
             return proto + ('--dport', '%d:%d' % (fport, lport)) \
@@ -184,7 +181,23 @@ class Method(BaseMethod):
         _ipt('-F', tproxy_chain)
         _ipt('-I', 'OUTPUT', '1', '-j', mark_chain)
         _ipt('-I', 'PREROUTING', '1', '-j', tproxy_chain)
-        _ipt('-A', divert_chain, '-j', 'MARK', '--set-mark', '1')
+
+        # Don't have packets sent to any of our local IP addresses go
+        # through the tproxy or mark chains.
+        #
+        # Without this fix, if a large subnet is redirected through
+        # sshuttle (i.e., 0/0), then the user may be unable to receive
+        # UDP responses or connect to their own machine using an IP
+        # besides (127.0.0.1). Prior to including these lines, the
+        # documentation reminded the user to use -x to exclude their
+        # own IP addresses to receive UDP responses if they are
+        # redirecting a large subnet through sshuttle (i.e., 0/0).
+        _ipt('-A', tproxy_chain, '-j', 'RETURN', '-m', 'addrtype',
+             '--dst-type', 'LOCAL')
+        _ipt('-A', mark_chain, '-j', 'RETURN', '-m', 'addrtype',
+             '--dst-type', 'LOCAL')
+
+        _ipt('-A', divert_chain, '-j', 'MARK', '--set-mark', tmark)
         _ipt('-A', divert_chain, '-j', 'ACCEPT')
         _ipt('-A', tproxy_chain, '-m', 'socket', '-j', divert_chain,
              '-m', 'tcp', '-p', 'tcp')
@@ -194,11 +207,11 @@ class Method(BaseMethod):
                  '-m', 'udp', '-p', 'udp')
 
         for _, ip in [i for i in nslist if i[0] == family]:
-            _ipt('-A', mark_chain, '-j', 'MARK', '--set-mark', '1',
+            _ipt('-A', mark_chain, '-j', 'MARK', '--set-mark', tmark,
                  '--dest', '%s/32' % ip,
                  '-m', 'udp', '-p', 'udp', '--dport', '53')
             _ipt('-A', tproxy_chain, '-j', 'TPROXY',
-                 '--tproxy-mark', '0x1/0x1',
+                 '--tproxy-mark', tmark,
                  '--dest', '%s/32' % ip,
                  '-m', 'udp', '-p', 'udp', '--dport', '53',
                  '--on-port', str(dnsport))
@@ -218,12 +231,12 @@ class Method(BaseMethod):
                      '-m', 'tcp',
                      *tcp_ports)
             else:
-                _ipt('-A', mark_chain, '-j', 'MARK', '--set-mark', '1',
+                _ipt('-A', mark_chain, '-j', 'MARK', '--set-mark', tmark,
                      '--dest', '%s/%s' % (snet, swidth),
                      '-m', 'tcp',
                      *tcp_ports)
                 _ipt('-A', tproxy_chain, '-j', 'TPROXY',
-                     '--tproxy-mark', '0x1/0x1',
+                     '--tproxy-mark', tmark,
                      '--dest', '%s/%s' % (snet, swidth),
                      '-m', 'tcp',
                      *(tcp_ports + ('--on-port', str(port))))
@@ -242,12 +255,12 @@ class Method(BaseMethod):
                          '-m', 'udp',
                          *udp_ports)
                 else:
-                    _ipt('-A', mark_chain, '-j', 'MARK', '--set-mark', '1',
+                    _ipt('-A', mark_chain, '-j', 'MARK', '--set-mark', tmark,
                          '--dest', '%s/%s' % (snet, swidth),
                          '-m', 'udp',
                          *udp_ports)
                     _ipt('-A', tproxy_chain, '-j', 'TPROXY',
-                         '--tproxy-mark', '0x1/0x1',
+                         '--tproxy-mark', tmark,
                          '--dest', '%s/%s' % (snet, swidth),
                          '-m', 'udp',
                          *(udp_ports + ('--on-port', str(port))))
@@ -262,9 +275,6 @@ class Method(BaseMethod):
 
         def _ipt(*args):
             return ipt(family, table, *args)
-
-        def _ipt_ttl(*args):
-            return ipt_ttl(family, table, *args)
 
         mark_chain = 'sshuttle-m-%s' % port
         tproxy_chain = 'sshuttle-t-%s' % port
@@ -284,3 +294,10 @@ class Method(BaseMethod):
         if ipt_chain_exists(family, table, divert_chain):
             _ipt('-F', divert_chain)
             _ipt('-X', divert_chain)
+
+    def is_supported(self):
+        if which("iptables") and which("ip6tables"):
+            return True
+        debug2("tproxy method not supported because 'iptables' "
+               "or 'ip6tables' commands are missing.\n")
+        return False

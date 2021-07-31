@@ -17,11 +17,11 @@ def main():
     if opt.sudoers or opt.sudoers_no_modify:
         if platform.platform().startswith('OpenBSD'):
             log('Automatic sudoers does not work on BSD')
-            exit(1)
+            return 1
 
         if not opt.sudoers_filename:
-            log('--sudoers-file must be set or omited.')
-            exit(1)
+            log('--sudoers-file must be set or omitted.')
+            return 1
 
         sudoers(
             user_name=opt.sudoers_user,
@@ -85,6 +85,13 @@ def main():
                 ipport_v4 = "auto"
                 # parse_ipport6('[::1]:0')
                 ipport_v6 = "auto" if not opt.disable_ipv6 else None
+            try:
+                int(opt.tmark, 16)
+            except ValueError:
+                parser.error("--tmark must be a hexadecimal value")
+            opt.tmark = opt.tmark.lower()   # make 'x' in 0x lowercase
+            if not opt.tmark.startswith("0x"):  # accept without 0x prefix
+                opt.tmark = "0x%s" % opt.tmark
             if opt.syslog:
                 ssyslog.start_syslog()
                 ssyslog.close_stdin()
@@ -95,6 +102,7 @@ def main():
                                       remotename,
                                       opt.python,
                                       opt.latency_control,
+                                      opt.latency_buffer_size,
                                       opt.dns,
                                       nslist,
                                       opt.method,
@@ -107,7 +115,8 @@ def main():
                                       opt.to_ns,
                                       opt.pidfile,
                                       opt.user,
-                                      opt.sudo_pythonpath)
+                                      opt.sudo_pythonpath,
+                                      opt.tmark)
 
             if return_code == 0:
                 log('Normal exit code, exiting...')
@@ -116,9 +125,9 @@ def main():
             return return_code
 
     except Fatal as e:
-        log('fatal: %s\n' % e)
+        log('fatal: %s' % e)
         return 99
     except KeyboardInterrupt:
         log('\n')
-        log('Keyboard interrupt: exiting.\n')
+        log('Keyboard interrupt: exiting.')
         return 1

@@ -49,10 +49,10 @@ setup(
         "License :: OSI Approved :: "
             "GNU Lesser General Public License v2 or later (LGPLv2+)",
         "Operating System :: OS Independent",
-        "Programming Language :: Python :: 3.5",
         "Programming Language :: Python :: 3.6",
         "Programming Language :: Python :: 3.7",
         "Programming Language :: Python :: 3.8",
+        "Programming Language :: Python :: 3.9",
         "Topic :: System :: Networking",
     ],
     scripts=['bin/sudoers-add'],
@@ -61,15 +61,13 @@ setup(
             'sshuttle = sshuttle.cmdline:main',
         ],
     },
-    python_requires='>=3.5',
+    python_requires='>=3.6',
     install_requires=[
-        'psutil',
     ],
     tests_require=[
         'pytest',
         'pytest-cov',
         'pytest-runner',
-        'mock',
         'flake8',
     ],
     keywords="ssh vpn",

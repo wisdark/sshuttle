@@ -45,6 +45,10 @@ Obtaining sshuttle
 - Fedora::
 
       dnf install sshuttle
+      
+ - Gentoo::
+ 
+      emerge -av net-proxy/sshuttle
 
 - NixOS::
 
@@ -66,6 +70,11 @@ Obtaining sshuttle
       cd /usr/ports/net/py-sshuttle && make install clean
       # pkg
       pkg install py36-sshuttle
+
+- macOS, via MacPorts::
+
+      sudo port selfupdate
+      sudo port install sshuttle
 
 It is also possible to install into a virtualenv as a non-root user.
 

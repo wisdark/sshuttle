@@ -132,6 +132,7 @@ def parse_ipport(s):
 
 
 def parse_list(lst):
+    """Parse a comma separated string into a list."""
     return re.split(r'[\s,]+', lst.strip()) if lst else []
 
 
@@ -146,9 +147,33 @@ class Concat(Action):
         setattr(namespace, self.dest, curr_value + values)
 
 
-parser = ArgumentParser(
+# Override one function in the ArgumentParser so that we can have
+# better control for how we parse files containing arguments. We
+# expect one argument per line, but strip whitespace/quotes from the
+# beginning/end of the lines.
+class MyArgumentParser(ArgumentParser):
+    def convert_arg_line_to_args(self, arg_line):
+        # Ignore comments
+        if arg_line.startswith("#"):
+            return []
+
+        # strip whitespace at beginning and end of line
+        arg_line = arg_line.strip()
+
+        # When copying parameters from the command line to a file,
+        # some users might copy the quotes they used on the command
+        # line into the config file. We ignore these if the line
+        # starts and ends with the same quote.
+        if arg_line.startswith("'") and arg_line.endswith("'") or \
+           arg_line.startswith('"') and arg_line.endswith('"'):
+            arg_line = arg_line[1:-1]
+
+        return [arg_line]
+
+
+parser = MyArgumentParser(
     prog="sshuttle",
-    usage="%(prog)s [-l [ip:]port] [-r [user@]sshserver[:port]] <subnets...>",
+    usage="%(prog)s [-l [ip:]port] -r [user@]sshserver[:port] <subnets...>",
     fromfile_prefix_chars="@"
 )
 parser.add_argument(
@@ -196,6 +221,7 @@ parser.add_argument(
     type=parse_list,
     help="""
     capture and forward DNS requests made to the following servers
+    (comma separated)
     """
 )
 parser.add_argument(
@@ -256,7 +282,7 @@ parser.add_argument(
     action="count",
     default=0,
     help="""
-    increase debug message verbosity
+    increase debug message verbosity (can be used more than once)
     """
 )
 parser.add_argument(
@@ -407,5 +433,14 @@ parser.add_argument(
     dest="sudo_pythonpath",
     help="""
     do not set PYTHONPATH when invoking sudo
+    """
+)
+parser.add_argument(
+    "-t", "--tmark",
+    metavar="[MARK]",
+    default="0x01",
+    help="""
+    tproxy optional traffic mark with provided MARK value in
+    hexadecimal (default '0x01')
     """
 )

@@ -6,7 +6,6 @@ import subprocess as ssubprocess
 import os
 import sys
 import platform
-import psutil
 
 import sshuttle.helpers as helpers
 import sshuttle.ssnet as ssnet
@@ -41,10 +40,11 @@ _extra_fd = os.open(os.devnull, os.O_RDONLY)
 
 
 def got_signal(signum, frame):
-    log('exiting on signal %d\n' % signum)
+    log('exiting on signal %d' % signum)
     sys.exit(1)
 
 
+# Filename of the pidfile created by the sshuttle client.
 _pidname = None
 
 
@@ -57,7 +57,7 @@ def check_daemon(pidfile):
         if e.errno == errno.ENOENT:
             return  # no pidfile, ok
         else:
-            raise Fatal("c : can't read %s: %s" % (_pidname, e))
+            raise Fatal("can't read %s: %s" % (_pidname, e))
     if not oldpid:
         os.unlink(_pidname)
         return  # invalid pidfile, ok
@@ -80,13 +80,25 @@ def check_daemon(pidfile):
 
 
 def daemonize():
+    # Try to open the pidfile prior to forking. If there is a problem,
+    # the client can then exit with a proper exit status code and
+    # message.
+    try:
+        outfd = os.open(_pidname, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    except PermissionError:
+        # User will have to look in syslog for error message since
+        # --daemon implies --syslog, all output gets redirected to
+        # syslog.
+        raise Fatal("failed to create/write pidfile %s" % _pidname)
+
+    # Create a daemon process with a new session id.
     if os.fork():
         os._exit(0)
     os.setsid()
     if os.fork():
         os._exit(0)
 
-    outfd = os.open(_pidname, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    # Write pid to the pidfile.
     try:
         os.write(outfd, b'%d\n' % os.getpid())
     finally:
@@ -177,19 +189,19 @@ class MultiListener:
         assert(self.bind_called)
         if self.v6:
             listenip = self.v6.getsockname()
-            debug1('%s listening on %r.\n' % (what, listenip))
-            debug2('%s listening with %r.\n' % (what, self.v6))
+            debug1('%s listening on %r.' % (what, listenip))
+            debug2('%s listening with %r.' % (what, self.v6))
         if self.v4:
             listenip = self.v4.getsockname()
-            debug1('%s listening on %r.\n' % (what, listenip))
-            debug2('%s listening with %r.\n' % (what, self.v4))
+            debug1('%s listening on %r.' % (what, listenip))
+            debug2('%s listening with %r.' % (what, self.v4))
 
 
 class FirewallClient:
 
     def __init__(self, method_name, sudo_pythonpath):
         self.auto_nets = []
-        python_path = os.path.dirname(os.path.dirname(__file__))
+
         argvbase = ([sys.executable, sys.argv[0]] +
                     ['-v'] * (helpers.verbose or 0) +
                     ['--method', method_name] +
@@ -211,7 +223,8 @@ class FirewallClient:
 
         if sudo_pythonpath:
             elev_prefix += ['/usr/bin/env',
-                            'PYTHONPATH=%s' % python_path]
+                            'PYTHONPATH=%s' %
+                            os.path.dirname(os.path.dirname(__file__))]
         argv_tries = [elev_prefix + argvbase, argvbase]
 
         # we can't use stdin/stdout=subprocess.PIPE here, as we normally would,
@@ -233,7 +246,7 @@ class FirewallClient:
                 # No env: Talking to `FirewallClient.start`, which has no i18n.
                 break
             except OSError as e:
-                log('Spawning firewall manager: %r\n' % argv)
+                log('Spawning firewall manager: %r' % argv)
                 raise Fatal(e)
         self.argv = argv
         s1.close()
@@ -248,7 +261,7 @@ class FirewallClient:
 
     def setup(self, subnets_include, subnets_exclude, nslist,
               redirectport_v6, redirectport_v4, dnsport_v6, dnsport_v4, udp,
-              user):
+              user, tmark):
         self.subnets_include = subnets_include
         self.subnets_exclude = subnets_exclude
         self.nslist = nslist
@@ -258,6 +271,7 @@ class FirewallClient:
         self.dnsport_v4 = dnsport_v4
         self.udp = udp
         self.user = user
+        self.tmark = tmark
 
     def check(self):
         rv = self.p.poll()
@@ -296,7 +310,8 @@ class FirewallClient:
         else:
             user = b'%d' % self.user
 
-        self.pfile.write(b'GO %d %s\n' % (udp, user))
+        self.pfile.write(b'GO %d %s %s\n' %
+                         (udp, user, bytes(self.tmark, 'ascii')))
         self.pfile.flush()
 
         line = self.pfile.readline()
@@ -325,23 +340,23 @@ def expire_connections(now, mux):
     remove = []
     for chan, timeout in dnsreqs.items():
         if timeout < now:
-            debug3('expiring dnsreqs channel=%d\n' % chan)
+            debug3('expiring dnsreqs channel=%d' % chan)
             remove.append(chan)
             del mux.channels[chan]
     for chan in remove:
         del dnsreqs[chan]
-    debug3('Remaining DNS requests: %d\n' % len(dnsreqs))
+    debug3('Remaining DNS requests: %d' % len(dnsreqs))
 
     remove = []
     for peer, (chan, timeout) in udp_by_src.items():
         if timeout < now:
-            debug3('expiring UDP channel channel=%d peer=%r\n' % (chan, peer))
+            debug3('expiring UDP channel channel=%d peer=%r' % (chan, peer))
             mux.send(chan, ssnet.CMD_UDP_CLOSE, b'')
             remove.append(peer)
             del mux.channels[chan]
     for peer in remove:
         del udp_by_src[peer]
-    debug3('Remaining UDP channels: %d\n' % len(udp_by_src))
+    debug3('Remaining UDP channels: %d' % len(udp_by_src))
 
 
 def onaccept_tcp(listener, method, mux, handlers):
@@ -350,7 +365,7 @@ def onaccept_tcp(listener, method, mux, handlers):
         sock, srcip = listener.accept()
     except socket.error as e:
         if e.args[0] in [errno.EMFILE, errno.ENFILE]:
-            debug1('Rejected incoming connection: too many open files!\n')
+            debug1('Rejected incoming connection: too many open files!')
             # free up an fd so we can eat the connection
             os.close(_extra_fd)
             try:
@@ -363,15 +378,15 @@ def onaccept_tcp(listener, method, mux, handlers):
             raise
 
     dstip = method.get_tcp_dstip(sock)
-    debug1('Accept TCP: %s:%r -> %s:%r.\n' % (srcip[0], srcip[1],
-                                              dstip[0], dstip[1]))
+    debug1('Accept TCP: %s:%r -> %s:%r.' % (srcip[0], srcip[1],
+                                            dstip[0], dstip[1]))
     if dstip[1] == sock.getsockname()[1] and islocal(dstip[0], sock.family):
-        debug1("-- ignored: that's my address!\n")
+        debug1("-- ignored: that's my address!")
         sock.close()
         return
     chan = mux.next_channel()
     if not chan:
-        log('warning: too many open channels.  Discarded connection.\n')
+        log('warning: too many open channels.  Discarded connection.')
         sock.close()
         return
     mux.send(chan, ssnet.CMD_TCP_CONNECT, b'%d,%s,%d' %
@@ -384,7 +399,7 @@ def onaccept_tcp(listener, method, mux, handlers):
 def udp_done(chan, data, method, sock, dstip):
     (src, srcport, data) = data.split(b",", 2)
     srcip = (src, int(srcport))
-    debug3('doing send from %r to %r\n' % (srcip, dstip,))
+    debug3('doing send from %r to %r' % (srcip, dstip,))
     method.send_udp(sock, srcip, dstip, data)
 
 
@@ -394,7 +409,7 @@ def onaccept_udp(listener, method, mux, handlers):
     if t is None:
         return
     srcip, dstip, data = t
-    debug1('Accept UDP: %r -> %r.\n' % (srcip, dstip,))
+    debug1('Accept UDP: %r -> %r.' % (srcip, dstip,))
     if srcip in udp_by_src:
         chan, _ = udp_by_src[srcip]
     else:
@@ -411,7 +426,7 @@ def onaccept_udp(listener, method, mux, handlers):
 
 
 def dns_done(chan, data, method, sock, srcip, dstip, mux):
-    debug3('dns_done: channel=%d src=%r dst=%r\n' % (chan, srcip, dstip))
+    debug3('dns_done: channel=%d src=%r dst=%r' % (chan, srcip, dstip))
     del mux.channels[chan]
     del dnsreqs[chan]
     method.send_udp(sock, srcip, dstip, data)
@@ -426,9 +441,9 @@ def ondns(listener, method, mux, handlers):
     # dstip is None if we are using a method where we can't determine
     # the destination IP of the DNS request that we captured from the client.
     if dstip is None:
-        debug1('DNS request from %r: %d bytes\n' % (srcip, len(data)))
+        debug1('DNS request from %r: %d bytes' % (srcip, len(data)))
     else:
-        debug1('DNS request from %r to %r: %d bytes\n' %
+        debug1('DNS request from %r to %r: %d bytes' %
                (srcip, dstip, len(data)))
     chan = mux.next_channel()
     dnsreqs[chan] = now + 30
@@ -439,30 +454,31 @@ def ondns(listener, method, mux, handlers):
 
 
 def _main(tcp_listener, udp_listener, fw, ssh_cmd, remotename,
-          python, latency_control,
+          python, latency_control, latency_buffer_size,
           dns_listener, seed_hosts, auto_hosts, auto_nets, daemon,
           to_nameserver):
 
     helpers.logprefix = 'c : '
-    debug1('Starting client with Python version %s\n'
+    debug1('Starting client with Python version %s'
            % platform.python_version())
 
     method = fw.method
 
     handlers = []
-    debug1('Connecting to server...\n')
+    debug1('Connecting to server...')
 
     try:
         (serverproc, serversock) = ssh.connect(
             ssh_cmd, remotename, python,
             stderr=ssyslog._p and ssyslog._p.stdin,
             options=dict(latency_control=latency_control,
+                         latency_buffer_size=latency_buffer_size,
                          auto_hosts=auto_hosts,
                          to_nameserver=to_nameserver,
                          auto_nets=auto_nets))
     except socket.error as e:
         if e.args[0] == errno.EPIPE:
-            raise Fatal("c : failed to establish ssh session (1)")
+            raise Fatal("failed to establish ssh session (1)")
         else:
             raise
     mux = Mux(serversock.makefile("rb"), serversock.makefile("wb"))
@@ -480,22 +496,99 @@ def _main(tcp_listener, udp_listener, fw, ssh_cmd, remotename,
         initstring = serversock.recv(len(expected))
     except socket.error as e:
         if e.args[0] == errno.ECONNRESET:
-            raise Fatal("c : failed to establish ssh session (2)")
+            raise Fatal("failed to establish ssh session (2)")
         else:
             raise
 
+    # Returns None if process is still running (or returns exit code)
     rv = serverproc.poll()
-    if rv:
-        raise Fatal('c : server died with error code %d' % rv)
+    if rv is not None:
+        errmsg = "server died with error code %d\n" % rv
+
+        # Our fatal exceptions return exit code 99
+        if rv == 99:
+            errmsg += "This error code likely means that python started and " \
+                "the sshuttle server started. However, the sshuttle server " \
+                "may have raised a 'Fatal' exception after it started."
+        elif rv == 98:
+            errmsg += "This error code likely means that we were able to " \
+                "run python on the server, but that the program continued " \
+                "to the line after we call python's exec() to execute " \
+                "sshuttle's server code. Try specifying the python " \
+                "executable to user on the server by passing --python " \
+                "to sshuttle."
+
+        # This error should only be possible when --python is not specified.
+        elif rv == 97 and not python:
+            errmsg += "This error code likely means that either we " \
+                "couldn't find python3 or python in the PATH on the " \
+                "server or that we do not have permission to run 'exec' in " \
+                "the /bin/sh shell on the server. Try specifying the " \
+                "python executable to use on the server by passing " \
+                "--python to sshuttle."
+
+        # POSIX sh standards says error code 127 is used when you try
+        # to execute a program that does not exist. See section 2.8.2
+        # of
+        # https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_08
+        elif rv == 127:
+            if python:
+                errmsg += "This error code likely means that we were not " \
+                    "able to execute the python executable that specified " \
+                    "with --python. You specified '%s'.\n" % python
+                if python.startswith("/"):
+                    errmsg += "\nTip for users in a restricted shell on the " \
+                        "server: The server may refuse to run programs " \
+                        "specified with an absolute path. Try specifying " \
+                        "just the name of the python executable. However, " \
+                        "if python is not in your PATH and you cannot " \
+                        "run programs specified with an absolute path, " \
+                        "it is possible that sshuttle will not work."
+            else:
+                errmsg += "This error code likely means that we were unable " \
+                    "to execute /bin/sh on the remote server. This can " \
+                    "happen if /bin/sh does not exist on the server or if " \
+                    "you are in a restricted shell that does not allow you " \
+                    "to run programs specified with an absolute path. " \
+                    "Try rerunning sshuttle with the --python parameter."
+
+        # When the redirected subnet includes the remote ssh host, the
+        # firewall rules can interrupt the ssh connection to the
+        # remote machine. This issue impacts some Linux machines. The
+        # user sees that the server dies with a broken pipe error and
+        # code 255.
+        #
+        # The solution to this problem is to exclude the remote
+        # server.
+        #
+        # There are many github issues from users encountering this
+        # problem. Most of the discussion on the topic is here:
+        # https://github.com/sshuttle/sshuttle/issues/191
+        elif rv == 255:
+            errmsg += "It might be possible to resolve this error by " \
+                "excluding the server that you are ssh'ing to. For example, " \
+                "if you are running 'sshuttle -v -r example.com 0/0' to " \
+                "redirect all traffic through example.com, then try " \
+                "'sshuttle -v -r example.com -x example.com 0/0' to " \
+                "exclude redirecting the connection to example.com itself " \
+                "(i.e., sshuttle's firewall rules may be breaking the " \
+                "ssh connection that it previously established). " \
+                "Alternatively, you may be able to use 'sshuttle -v -r " \
+                "example.com -x example.com:22 0/0' to redirect " \
+                "everything except ssh connections between your machine " \
+                "and example.com."
+
+        raise Fatal(errmsg)
 
     if initstring != expected:
-        raise Fatal('c : expected server init string %r; got %r'
+        raise Fatal('expected server init string %r; got %r'
                     % (expected, initstring))
-    log('Connected to server.\n')
+    log('Connected to server.')
     sys.stdout.flush()
+
     if daemon:
         daemonize()
-        log('daemonizing (%s).\n' % _pidname)
+        log('daemonizing (%s).' % _pidname)
 
     def onroutes(routestr):
         if auto_nets:
@@ -507,11 +600,11 @@ def _main(tcp_listener, udp_listener, fw, ssh_cmd, remotename,
                 width = int(width)
                 ip = ip.decode("ASCII")
                 if family == socket.AF_INET6 and tcp_listener.v6 is None:
-                    debug2("Ignored auto net %d/%s/%d\n" % (family, ip, width))
+                    debug2("Ignored auto net %d/%s/%d" % (family, ip, width))
                 if family == socket.AF_INET and tcp_listener.v4 is None:
-                    debug2("Ignored auto net %d/%s/%d\n" % (family, ip, width))
+                    debug2("Ignored auto net %d/%s/%d" % (family, ip, width))
                 else:
-                    debug2("Adding auto net %d/%s/%d\n" % (family, ip, width))
+                    debug2("Adding auto net %d/%s/%d" % (family, ip, width))
                     fw.auto_nets.append((family, ip, width, 0, 0))
 
         # we definitely want to do this *after* starting ssh, or we might end
@@ -531,7 +624,7 @@ def _main(tcp_listener, udp_listener, fw, ssh_cmd, remotename,
         sdnotify.send(sdnotify.ready(), sdnotify.status('Connected'))
 
     def onhostlist(hostlist):
-        debug2('got host list: %r\n' % hostlist)
+        debug2('got host list: %r' % hostlist)
         for line in hostlist.strip().split():
             if line:
                 name, ip = line.split(b',', 1)
@@ -547,7 +640,7 @@ def _main(tcp_listener, udp_listener, fw, ssh_cmd, remotename,
         dns_listener.add_handler(handlers, ondns, method, mux)
 
     if seed_hosts is not None:
-        debug1('seed_hosts: %r\n' % seed_hosts)
+        debug1('seed_hosts: %r' % seed_hosts)
         mux.send(0, ssnet.CMD_HOST_REQ, str.encode('\n'.join(seed_hosts)))
 
     def check_ssh_alive():
@@ -555,7 +648,9 @@ def _main(tcp_listener, udp_listener, fw, ssh_cmd, remotename,
             # poll() won't tell us when process exited since the
             # process is no longer our child (it returns 0 all the
             # time).
-            if not psutil.pid_exists(serverproc.pid):
+            try:
+                os.kill(serverproc.pid, 0)
+            except OSError:
                 raise Fatal('ssh connection to server (pid %d) exited.' %
                             serverproc.pid)
         else:
@@ -573,40 +668,47 @@ def _main(tcp_listener, udp_listener, fw, ssh_cmd, remotename,
 
 
 def main(listenip_v6, listenip_v4,
-         ssh_cmd, remotename, python, latency_control, dns, nslist,
+         ssh_cmd, remotename, python, latency_control,
+         latency_buffer_size, dns, nslist,
          method_name, seed_hosts, auto_hosts, auto_nets,
          subnets_include, subnets_exclude, daemon, to_nameserver, pidfile,
-         user, sudo_pythonpath):
+         user, sudo_pythonpath, tmark):
 
     if not remotename:
-        print("WARNING: You must specify -r/--remote to securely route "
-              "traffic to a remote machine. Running without -r/--remote "
-              "is only recommended for testing.")
+        raise Fatal("You must use -r/--remote to specify a remote "
+                    "host to route traffic through.")
 
     if daemon:
         try:
             check_daemon(pidfile)
         except Fatal as e:
-            log("%s\n" % e)
+            log("%s" % e)
             return 5
-    debug1('Starting sshuttle proxy (version %s).\n' % __version__)
+    debug1('Starting sshuttle proxy (version %s).' % __version__)
     helpers.logprefix = 'c : '
 
     fw = FirewallClient(method_name, sudo_pythonpath)
 
-    # If --dns is used, store the IP addresses that the client
-    # normally uses for DNS lookups in nslist. The firewall needs to
-    # redirect packets outgoing to this server to the remote host
+    # nslist is the list of name severs to intercept. If --dns is
+    # used, we add all DNS servers in resolv.conf. Otherwise, the list
+    # can be populated with the --ns-hosts option (which is already
+    # stored in nslist). This list is used to setup the firewall so it
+    # can redirect packets outgoing to this server to the remote host
     # instead.
     if dns:
         nslist += resolvconf_nameservers(True)
+
+    # If we are intercepting DNS requests, we tell the remote host
+    # where it should send the DNS requests to with the --to-ns
+    # option.
+    if len(nslist) > 0:
         if to_nameserver is not None:
             to_nameserver = "%s@%s" % tuple(to_nameserver[1:])
-    else:
-        # option doesn't make sense if we aren't proxying dns
+    else:  # if we are not intercepting DNS traffic
+        # ...and the user specified a server to send DNS traffic to.
         if to_nameserver and len(to_nameserver) > 0:
-            print("WARNING: --to-ns option is ignored because --dns was not "
-                  "used.")
+            print("WARNING: --to-ns option is ignored unless "
+                  "--dns or --ns-hosts is used.")
         to_nameserver = None
 
     # Get family specific subnet lists. Also, the user may not specify
@@ -642,14 +744,14 @@ def main(listenip_v6, listenip_v4,
     #    "auto" when listen address is unspecified.
     #    The user specified address if provided by user
     if listenip_v6 is None:
-        debug1("IPv6 disabled by --disable-ipv6\n")
+        debug1("IPv6 disabled by --disable-ipv6")
     if listenip_v6 == "auto":
         if avail.ipv6:
-            debug1("IPv6 enabled: Using default IPv6 listen address ::1\n")
+            debug1("IPv6 enabled: Using default IPv6 listen address ::1")
             listenip_v6 = ('::1', 0)
         else:
             debug1("IPv6 disabled since it isn't supported by method "
-                   "%s.\n" % fw.method.name)
+                   "%s." % fw.method.name)
             listenip_v6 = None
 
     # Make final decision about enabling IPv6:
@@ -721,9 +823,9 @@ def main(listenip_v6, listenip_v4,
                 msg += "(available)"
             else:
                 msg += "(not available with %s method)" % fw.method.name
-        debug1(msg + "\n")
+        debug1(msg)
 
-    debug1("Method: %s\n" % fw.method.name)
+    debug1("Method: %s" % fw.method.name)
     feature_status("IPv4", required.ipv4, avail.ipv4)
     feature_status("IPv6", required.ipv6, avail.ipv6)
     feature_status("UDP ", required.udp, avail.udp)
@@ -743,20 +845,20 @@ def main(listenip_v6, listenip_v4,
     # because we do that below when we have identified the ports to
     # listen on.
     debug1("Subnets to forward through remote host (type, IP, cidr mask "
-           "width, startPort, endPort):\n")
+           "width, startPort, endPort):")
     for i in subnets_include:
-        debug1("  "+str(i)+"\n")
+        debug1("  "+str(i))
     if auto_nets:
         debug1("NOTE: Additional subnets to forward may be added below by "
-               "--auto-nets.\n")
-    debug1("Subnets to exclude from forwarding:\n")
+               "--auto-nets.")
+    debug1("Subnets to exclude from forwarding:")
     for i in subnets_exclude:
-        debug1("  "+str(i)+"\n")
+        debug1("  "+str(i))
     if required.dns:
         debug1("DNS requests normally directed at these servers will be "
-               "redirected to remote:\n")
+               "redirected to remote:")
         for i in nslist:
-            debug1("  "+str(i)+"\n")
+            debug1("  "+str(i))
 
     if listenip_v6 and listenip_v6[1] and listenip_v4 and listenip_v4[1]:
         # if both ports given, no need to search for a spare port
@@ -774,7 +876,7 @@ def main(listenip_v6, listenip_v4,
     redirectport_v4 = 0
     bound = False
     for port in ports:
-        debug2('Trying to bind redirector on port %d\n' % port)
+        debug2('Trying to bind redirector on port %d' % port)
         tcp_listener = MultiListener()
 
         if required.udp:
@@ -829,7 +931,7 @@ def main(listenip_v6, listenip_v4,
         # search for spare port for DNS
         ports = range(12300, 9000, -1)
         for port in ports:
-            debug2('Trying to bind DNS redirector on port %d\n' % port)
+            debug2('Trying to bind DNS redirector on port %d' % port)
             if port in used_ports:
                 continue
 
@@ -902,13 +1004,14 @@ def main(listenip_v6, listenip_v4,
     # start the firewall
     fw.setup(subnets_include, subnets_exclude, nslist,
              redirectport_v6, redirectport_v4, dnsport_v6, dnsport_v4,
-             required.udp, user)
+             required.udp, user, tmark)
 
     # start the client process
     try:
         return _main(tcp_listener, udp_listener, fw, ssh_cmd, remotename,
-                     python, latency_control, dns_listener,
-                     seed_hosts, auto_hosts, auto_nets, daemon, to_nameserver)
+                     python, latency_control, latency_buffer_size,
+                     dns_listener, seed_hosts, auto_hosts, auto_nets,
+                     daemon, to_nameserver)
     finally:
         try:
             if daemon:
