@@ -22,19 +22,7 @@ try:
 except ImportError:
     getpwnam = None
 
-try:
-    # try getting recvmsg from python
-    import socket as pythonsocket
-    getattr(pythonsocket.socket, "recvmsg")
-    socket = pythonsocket
-except AttributeError:
-    # try getting recvmsg from socket_ext library
-    try:
-        import socket_ext
-        getattr(socket_ext.socket, "recvmsg")
-        socket = socket_ext
-    except ImportError:
-        import socket
+import socket
 
 _extra_fd = os.open(os.devnull, os.O_RDONLY)
 
@@ -164,7 +152,7 @@ class MultiListener:
             try:
                 self.v4.listen(backlog)
             except socket.error as e:
-                # on some systems v4 bind will fail if the v6 suceeded,
+                # on some systems v4 bind will fail if the v6 succeeded,
                 # in this case the v6 socket will receive v4 too.
                 if e.errno == errno.EADDRINUSE and self.v6:
                     self.v4 = None
