@@ -164,7 +164,22 @@ class MultiListener:
         self.bind_called = True
         if address_v6 is not None:
             self.v6 = socket.socket(socket.AF_INET6, self.type, self.proto)
-            self.v6.bind(address_v6)
+            try:
+                self.v6.bind(address_v6)
+            except OSError as e:
+                if e.errno == errno.EADDRNOTAVAIL:
+                    # On an IPv6 Linux machine, this situation occurs
+                    # if you run the following prior to running
+                    # sshuttle:
+                    #
+                    # echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6
+                    # echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6
+                    raise Fatal("Could not bind to an IPv6 socket with "
+                                "address %s and port %s. "
+                                "Potential workaround: Run sshuttle "
+                                "with '--disable-ipv6'."
+                                % (str(address_v6[0]), str(address_v6[1])))
+                raise e
         else:
             self.v6 = None
         if address_v4 is not None:
@@ -197,55 +212,106 @@ class FirewallClient:
         if ssyslog._p:
             argvbase += ['--syslog']
 
-        # Determine how to prefix the command in order to elevate privileges.
-        if platform.platform().startswith('OpenBSD'):
-            elev_prefix = ['doas']  # OpenBSD uses built in `doas`
+        # A list of commands that we can try to run to start the firewall.
+        argv_tries = []
+
+        if os.getuid() == 0:  # No need to elevate privileges
+            argv_tries.append(argvbase)
         else:
-            elev_prefix = ['sudo', '-p', '[local sudo] Password: ']
+            # Linux typically uses sudo; OpenBSD uses doas. However, some
+            # Linux distributions are starting to use doas.
+            sudo_cmd = ['sudo', '-p', '[local sudo] Password: ']
+            doas_cmd = ['doas']
 
-        # Look for binary and switch to absolute path if we can find
-        # it.
-        path = which(elev_prefix[0])
-        if path:
-            elev_prefix[0] = path
+            # For clarity, try to replace executable name with the
+            # full path.
+            doas_path = which("doas")
+            if doas_path:
+                doas_cmd[0] = doas_path
+            sudo_path = which("sudo")
+            if sudo_path:
+                sudo_cmd[0] = sudo_path
 
-        if sudo_pythonpath:
-            elev_prefix += ['/usr/bin/env',
-                            'PYTHONPATH=%s' %
-                            os.path.dirname(os.path.dirname(__file__))]
-        argv_tries = [elev_prefix + argvbase, argvbase]
+            # sudo_pythonpath indicates if we should set the
+            # PYTHONPATH environment variable when elevating
+            # privileges. This can be adjusted with the
+            # --no-sudo-pythonpath option.
+            if sudo_pythonpath:
+                pp_prefix = ['/usr/bin/env',
+                             'PYTHONPATH=%s' %
+                             os.path.dirname(os.path.dirname(__file__))]
+                sudo_cmd = sudo_cmd + pp_prefix
+                doas_cmd = doas_cmd + pp_prefix
 
-        # we can't use stdin/stdout=subprocess.PIPE here, as we normally would,
-        # because stupid Linux 'su' requires that stdin be attached to a tty.
-        # Instead, attach a *bidirectional* socket to its stdout, and use
-        # that for talking in both directions.
-        (s1, s2) = socket.socketpair()
+            # Final order should be: sudo/doas command, env
+            # pythonpath, and then argvbase (sshuttle command).
+            sudo_cmd = sudo_cmd + argvbase
+            doas_cmd = doas_cmd + argvbase
 
-        def setup():
-            # run in the child process
-            s2.close()
-        if os.getuid() == 0:
-            argv_tries = argv_tries[-1:]  # last entry only
+            # If we can find doas and not sudo or if we are on
+            # OpenBSD, try using doas first.
+            if (doas_path and not sudo_path) or \
+               platform.platform().startswith('OpenBSD'):
+                argv_tries = [doas_cmd, sudo_cmd, argvbase]
+            else:
+                argv_tries = [sudo_cmd, doas_cmd, argvbase]
+
+        # Try all commands in argv_tries in order. If a command
+        # produces an error, try the next one. If command is
+        # successful, set 'success' variable and break.
+        success = False
         for argv in argv_tries:
+            # we can't use stdin/stdout=subprocess.PIPE here, as we
+            # normally would, because stupid Linux 'su' requires that
+            # stdin be attached to a tty. Instead, attach a
+            # *bidirectional* socket to its stdout, and use that for
+            # talking in both directions.
+            (s1, s2) = socket.socketpair()
+
+            def setup():
+                # run in the child process
+                s2.close()
+
             try:
-                if argv[0] == 'su':
-                    sys.stderr.write('[local su] ')
+                debug1("Starting firewall manager with command: %r" % argv)
                 self.p = ssubprocess.Popen(argv, stdout=s1, preexec_fn=setup)
                 # No env: Talking to `FirewallClient.start`, which has no i18n.
-                break
             except OSError as e:
-                log('Spawning firewall manager: %r' % argv)
-                raise Fatal(e)
-        self.argv = argv
-        s1.close()
-        self.pfile = s2.makefile('rwb')
-        line = self.pfile.readline()
-        self.check()
-        if line[0:5] != b'READY':
-            raise Fatal('%r expected READY, got %r' % (self.argv, line))
-        method_name = line[6:-1]
-        self.method = get_method(method_name.decode("ASCII"))
-        self.method.set_firewall(self)
+                # This exception will occur if the program isn't
+                # present or isn't executable.
+                debug1('Unable to start firewall manager. Popen failed. '
+                       'Command=%r Exception=%s' % (argv, e))
+                continue
+
+            self.argv = argv
+            s1.close()
+            self.pfile = s2.makefile('rwb')
+            line = self.pfile.readline()
+
+            rv = self.p.poll()   # Check if process is still running
+            if rv:
+                # We might get here if program runs and exits before
+                # outputting anything. For example, someone might have
+                # entered the wrong password to elevate privileges.
+                debug1('Unable to start firewall manager. '
+                       'Process exited too early. '
+                       '%r returned %d' % (self.argv, rv))
+                continue
+
+            if line[0:5] != b'READY':
+                debug1('Unable to start firewall manager. '
+                       'Expected READY, got %r. '
+                       'Command=%r' % (line, self.argv))
+                continue
+
+            method_name = line[6:-1]
+            self.method = get_method(method_name.decode("ASCII"))
+            self.method.set_firewall(self)
+            success = True
+            break
+
+        if not success:
+            raise Fatal("All attempts to elevate privileges failed.")
 
     def setup(self, subnets_include, subnets_exclude, nslist,
               redirectport_v6, redirectport_v4, dnsport_v6, dnsport_v4, udp,
@@ -298,8 +364,8 @@ class FirewallClient:
         else:
             user = b'%d' % self.user
 
-        self.pfile.write(b'GO %d %s %s\n' %
-                         (udp, user, bytes(self.tmark, 'ascii')))
+        self.pfile.write(b'GO %d %s %s %d\n' %
+                         (udp, user, bytes(self.tmark, 'ascii'), os.getpid()))
         self.pfile.flush()
 
         line = self.pfile.readline()
