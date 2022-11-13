@@ -1,6 +1,5 @@
 import re
 import socket
-import platform
 import sshuttle.helpers as helpers
 import sshuttle.client as client
 import sshuttle.firewall as firewall
@@ -14,20 +13,9 @@ from sshuttle.sudoers import sudoers
 def main():
     opt = parser.parse_args()
 
-    if opt.sudoers or opt.sudoers_no_modify:
-        if platform.platform().startswith('OpenBSD'):
-            log('Automatic sudoers does not work on BSD')
-            return 1
-
-        if not opt.sudoers_filename:
-            log('--sudoers-file must be set or omitted.')
-            return 1
-
-        sudoers(
-            user_name=opt.sudoers_user,
-            no_modify=opt.sudoers_no_modify,
-            file_name=opt.sudoers_filename
-        )
+    if opt.sudoers_no_modify:
+        # sudoers() calls exit() when it completes
+        sudoers(user_name=opt.sudoers_user)
 
     if opt.daemon:
         opt.syslog = 1
@@ -45,7 +33,8 @@ def main():
                 parser.error('exactly zero arguments expected')
             return firewall.main(opt.method, opt.syslog)
         elif opt.hostwatch:
-            return hostwatch.hw_main(opt.subnets, opt.auto_hosts)
+            hostwatch.hw_main(opt.subnets, opt.auto_hosts)
+            return 0
         else:
             # parse_subnetports() is used to create a list of includes
             # and excludes. It is called once for each parameter and
