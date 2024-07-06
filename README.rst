@@ -73,7 +73,11 @@ Obtaining sshuttle
       # ports
       cd /usr/ports/net/py-sshuttle && make install clean
       # pkg
-      pkg install py36-sshuttle
+      pkg install py39-sshuttle
+
+- OpenBSD::
+
+      pkg_add sshuttle
 
 - macOS, via MacPorts::
 

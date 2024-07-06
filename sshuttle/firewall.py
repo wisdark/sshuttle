@@ -110,11 +110,6 @@ def setup_daemon():
         # setsid() fails if sudo is configured with the use_pty option.
         pass
 
-    # because of limitations of the 'su' command, the *real* stdin/stdout
-    # are both attached to stdout initially.  Clone stdout into stdin so we
-    # can read from it.
-    os.dup2(1, 0)
-
     return sys.stdin, sys.stdout
 
 
@@ -270,13 +265,15 @@ def main(method_name, syslog):
 
     _, _, args = line.partition(" ")
     global sshuttle_pid
-    udp, user, tmark, sshuttle_pid = args.strip().split(" ", 3)
+    udp, user, group, tmark, sshuttle_pid = args.strip().split(" ", 4)
     udp = bool(int(udp))
     sshuttle_pid = int(sshuttle_pid)
     if user == '-':
         user = None
-    debug2('Got udp: %r, user: %r, tmark: %s, sshuttle_pid: %d' %
-           (udp, user, tmark, sshuttle_pid))
+    if group == '-':
+        group = None
+    debug2('Got udp: %r, user: %r, group: %r, tmark: %s, sshuttle_pid: %d' %
+           (udp, user, group, tmark, sshuttle_pid))
 
     subnets_v6 = [i for i in subnets if i[0] == socket.AF_INET6]
     nslist_v6 = [i for i in nslist if i[0] == socket.AF_INET6]
@@ -291,14 +288,14 @@ def main(method_name, syslog):
             method.setup_firewall(
                 port_v6, dnsport_v6, nslist_v6,
                 socket.AF_INET6, subnets_v6, udp,
-                user, tmark)
+                user, group, tmark)
 
         if subnets_v4 or nslist_v4:
             debug2('setting up IPv4.')
             method.setup_firewall(
                 port_v4, dnsport_v4, nslist_v4,
                 socket.AF_INET, subnets_v4, udp,
-                user, tmark)
+                user, group, tmark)
 
         flush_systemd_dns_cache()
         stdout.write('STARTED\n')
@@ -334,7 +331,7 @@ def main(method_name, syslog):
         try:
             if subnets_v6 or nslist_v6:
                 debug2('undoing IPv6 changes.')
-                method.restore_firewall(port_v6, socket.AF_INET6, udp, user)
+                method.restore_firewall(port_v6, socket.AF_INET6, udp, user, group)
         except Exception:
             try:
                 debug1("Error trying to undo IPv6 firewall.")
@@ -345,7 +342,7 @@ def main(method_name, syslog):
         try:
             if subnets_v4 or nslist_v4:
                 debug2('undoing IPv4 changes.')
-                method.restore_firewall(port_v4, socket.AF_INET, udp, user)
+                method.restore_firewall(port_v4, socket.AF_INET, udp, user, group)
         except Exception:
             try:
                 debug1("Error trying to undo IPv4 firewall.")
