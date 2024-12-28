@@ -1,7 +1,16 @@
 Microsoft Windows
 =================
-Currently there is no built in support for running sshuttle directly on
-Microsoft Windows.
+
+Experimental native support::
+
+Experimental built-in support for Windows is available through `windivert` method.
+You have to install https://pypi.org/project/pydivert package.  You need Administrator privileges to use windivert method
+
+Notes
+-  sshuttle should be executed from admin shell (Automatic firewall process admin elevation is not available)
+-  TCP/IPv4 supported (IPv6/UDP/DNS are not available)
+
+Use Linux VM on Windows::
 
 What we can really do is to create a Linux VM with Vagrant (or simply
 Virtualbox if you like). In the Vagrant settings, remember to turn on bridged

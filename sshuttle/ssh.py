@@ -12,7 +12,7 @@ import ipaddress
 from urllib.parse import urlparse
 
 import sshuttle.helpers as helpers
-from sshuttle.helpers import debug2, which, get_path, Fatal
+from sshuttle.helpers import debug2, which, get_path, SocketRWShim, Fatal
 
 
 def get_module_source(name):
@@ -84,7 +84,7 @@ def parse_hostport(rhostport):
     return username, password, port, host
 
 
-def connect(ssh_cmd, rhostport, python, stderr, add_cmd_delimiter, options):
+def connect(ssh_cmd, rhostport, python, stderr, add_cmd_delimiter, remote_shell, options):
     username, password, port, host = parse_hostport(rhostport)
     if username:
         rhost = "{}@{}".format(username, host)
@@ -115,8 +115,8 @@ def connect(ssh_cmd, rhostport, python, stderr, add_cmd_delimiter, options):
     pyscript = r"""
                 import sys, os;
                 verbosity=%d;
-                sys.stdin = os.fdopen(0, "rb");
-                exec(compile(sys.stdin.read(%d), "assembler.py", "exec"));
+                stdin = os.fdopen(0, 'rb');
+                exec(compile(stdin.read(%d), 'assembler.py', 'exec'));
                 sys.exit(98);
                 """ % (helpers.verbose or 0, len(content))
     pyscript = re.sub(r'\s+', ' ', pyscript.strip())
@@ -134,51 +134,59 @@ def connect(ssh_cmd, rhostport, python, stderr, add_cmd_delimiter, options):
             portl = ["-p", str(port)]
         else:
             portl = []
-        if python:
-            pycmd = "'%s' -c '%s'" % (python, pyscript)
-        else:
-            # By default, we run the following code in a shell.
-            # However, with restricted shells and other unusual
-            # situations, there can be trouble. See the RESTRICTED
-            # SHELL section in "man bash" for more information. The
-            # code makes many assumptions:
-            #
-            # (1) That /bin/sh exists and that we can call it.
-            # Restricted shells often do *not* allow you to run
-            # programs specified with an absolute path like /bin/sh.
-            # Either way, if there is trouble with this, it should
-            # return error code 127.
-            #
-            # (2) python3 or python exists in the PATH and is
-            # executable. If they aren't, then exec won't work (see (4)
-            # below).
-            #
-            # (3) In /bin/sh, that we can redirect stderr in order to
-            # hide the version that "python3 -V" might print (some
-            # restricted shells don't allow redirection, see
-            # RESTRICTED SHELL section in 'man bash'). However, if we
-            # are in a restricted shell, we'd likely have trouble with
-            # assumption (1) above.
-            #
-            # (4) The 'exec' command should work except if we failed
-            # to exec python because it doesn't exist or isn't
-            # executable OR if exec isn't allowed (some restricted
-            # shells don't allow exec). If the exec succeeded, it will
-            # not return and not get to the "exit 97" command. If exec
-            # does return, we exit with code 97.
-            #
-            # Specifying the exact python program to run with --python
-            # avoids many of the issues above. However, if
-            # you have a restricted shell on remote, you may only be
-            # able to run python if it is in your PATH (and you can't
-            # run programs specified with an absolute path). In that
-            # case, sshuttle might not work at all since it is not
-            # possible to run python on the remote machine---even if
-            # it is present.
-            pycmd = ("P=python3; $P -V 2>%s || P=python; "
-                     "exec \"$P\" -c %s; exit 97") % \
-                (os.devnull, quote(pyscript))
-            pycmd = ("/bin/sh -c {}".format(quote(pycmd)))
+        if remote_shell == "cmd":
+            pycmd = '"%s" -c "%s"' % (python or 'python', pyscript)
+        elif remote_shell == "powershell":
+            for c in ('\'', ' ', ';', '(', ')', ','):
+                pyscript = pyscript.replace(c, '`' + c)
+            pycmd = '%s -c %s' % (python or 'python', pyscript)
+        else:  # posix shell expected
+            if python:
+                pycmd = '"%s" -c "%s"' % (python, pyscript)
+            else:
+                # By default, we run the following code in a shell.
+                # However, with restricted shells and other unusual
+                # situations, there can be trouble. See the RESTRICTED
+                # SHELL section in "man bash" for more information. The
+                # code makes many assumptions:
+                #
+                # (1) That /bin/sh exists and that we can call it.
+                # Restricted shells often do *not* allow you to run
+                # programs specified with an absolute path like /bin/sh.
+                # Either way, if there is trouble with this, it should
+                # return error code 127.
+                #
+                # (2) python3 or python exists in the PATH and is
+                # executable. If they aren't, then exec won't work (see (4)
+                # below).
+                #
+                # (3) In /bin/sh, that we can redirect stderr in order to
+                # hide the version that "python3 -V" might print (some
+                # restricted shells don't allow redirection, see
+                # RESTRICTED SHELL section in 'man bash'). However, if we
+                # are in a restricted shell, we'd likely have trouble with
+                # assumption (1) above.
+                #
+                # (4) The 'exec' command should work except if we failed
+                # to exec python because it doesn't exist or isn't
+                # executable OR if exec isn't allowed (some restricted
+                # shells don't allow exec). If the exec succeeded, it will
+                # not return and not get to the "exit 97" command. If exec
+                # does return, we exit with code 97.
+                #
+                # Specifying the exact python program to run with --python
+                # avoids many of the issues above. However, if
+                # you have a restricted shell on remote, you may only be
+                # able to run python if it is in your PATH (and you can't
+                # run programs specified with an absolute path). In that
+                # case, sshuttle might not work at all since it is not
+                # possible to run python on the remote machine---even if
+                # it is present.
+                devnull = '/dev/null'
+                pycmd = ("P=python3; $P -V 2>%s || P=python; "
+                         "exec \"$P\" -c %s; exit 97") % \
+                    (devnull, quote(pyscript))
+                pycmd = ("/bin/sh -c {}".format(quote(pycmd)))
 
         if password is not None:
             os.environ['SSHPASS'] = str(password)
@@ -203,19 +211,45 @@ def connect(ssh_cmd, rhostport, python, stderr, add_cmd_delimiter, options):
         raise Fatal("Failed to find '%s' in path %s" % (argv[0], get_path()))
     argv[0] = abs_path
 
-    (s1, s2) = socket.socketpair()
+    if sys.platform != 'win32':
+        (s1, s2) = socket.socketpair()
+        pstdin, pstdout = os.dup(s1.fileno()), os.dup(s1.fileno())
 
-    def setup():
-        # runs in the child process
-        s2.close()
-    s1a, s1b = os.dup(s1.fileno()), os.dup(s1.fileno())
-    s1.close()
+        def preexec_fn():
+            # runs in the child process
+            s2.close()
+        s1.close()
 
-    debug2('executing: %r' % argv)
-    p = ssubprocess.Popen(argv, stdin=s1a, stdout=s1b, preexec_fn=setup,
-                          close_fds=True, stderr=stderr)
-    os.close(s1a)
-    os.close(s1b)
-    s2.sendall(content)
-    s2.sendall(content2)
-    return p, s2
+        def get_server_io():
+            os.close(pstdin)
+            os.close(pstdout)
+            return s2.makefile("rb", buffering=0), s2.makefile("wb", buffering=0)
+    else:
+        # In Windows CPython, BSD sockets are not supported as subprocess stdio
+        # and select.select() used in ssnet.py won't work on Windows pipes.
+        # So we have to use both socketpair (for select.select) and pipes (for subprocess.Popen) together
+        # along with reader/writer threads to stream data between them
+        # NOTE: Their could be a better way. Need to investigate further on this.
+        #   Either to use sockets as stdio for subprocess. Or to use pipes but with a select() alternative
+        #   https://stackoverflow.com/questions/4993119/redirect-io-of-process-to-windows-socket
+
+        pstdin = ssubprocess.PIPE
+        pstdout = ssubprocess.PIPE
+
+        preexec_fn = None
+
+        def get_server_io():
+            shim = SocketRWShim(p.stdout, p.stdin, on_end=lambda: p.terminate())
+            return shim.makefiles()
+
+    # See: stackoverflow.com/questions/48671215/howto-workaround-of-close-fds-true-and-redirect-stdout-stderr-on-windows
+    close_fds = False if sys.platform == 'win32' else True
+
+    debug2("executing: %r" % argv)
+    p = ssubprocess.Popen(argv, stdin=pstdin, stdout=pstdout, preexec_fn=preexec_fn,
+                          close_fds=close_fds, stderr=stderr, bufsize=0)
+
+    rfile, wfile = get_server_io()
+    wfile.write(content)
+    wfile.write(content2)
+    return p, rfile, wfile
